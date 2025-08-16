@@ -22,11 +22,15 @@ status_write () {
 status_start () { status_write true  "playout" "$1" "$2" "$$"; }
 status_stop  () { status_write false "playout" "$1" "$2" 0; }
 
-# =================== state paths / dirs ===================
+# =================== state paths / dirs logs ===================
 STATE_DIR="${STATE_DIR:-/opt/backup/state}"
 PLAY_STATE="$STATE_DIR/playout.json"
 PID_FILE="$STATE_DIR/playout.pid"
 LOG="/opt/backup/logs/playout_gst.log"
+if ! : >>"$LOG" 2>/dev/null; then
+  echo "[warn] $LOG not writable; using /dev/null"
+  LOG="/dev/null"
+fi
 mkdir -p "$STATE_DIR" "$(dirname "$LOG")" "$(dirname "$BB_STATUS_FILE")" /opt/backup/latest
 
 # =================== stale-state coercion ===================
