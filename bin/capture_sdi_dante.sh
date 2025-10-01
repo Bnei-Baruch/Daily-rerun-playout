@@ -164,14 +164,16 @@ fi
 DUR=""
 LABEL="capture"
 OUTFILE=""
+AUDIO_MODE="${AUDIO_MODE:-dante}"   # dante | sdi
 
-usage(){ echo "usage: $0 [-d seconds] [-r label] [-o /path/file.mp4]"; exit 1; }
+usage(){ echo "usage: $0 [-d seconds] [-r label] [-o /path/file.mp4] [--audio dante|sdi]"; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -d|--duration) DUR="$2"; shift 2;;
     -r|--label)    LABEL="$2"; shift 2;;
     -o|--out)      OUTFILE="$2"; shift 2;;
+    --audio)       AUDIO_MODE="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; shift 2;;
     -h|--help)     usage;;
     *) echo "unknown arg: $1" >&2; usage;;
   esac
@@ -191,57 +193,85 @@ echo ">>> Progress:     $PROG_FILE"
 
 
 # =================== FFmpeg ===================
-# Audio: DVS 64ch (big-endian) -> 36 output tracks (0: stereo, then many mono, last stereo)
-COMMON_INPUTS=(
-  -hide_banner -y
-  -progress "$PROG_FILE"
-  -thread_queue_size 512 -big_endian 1 -f audiotoolbox -i "AUDINATE-DVS-UID"
-  -thread_queue_size 512 -format_code Hi50 -f decklink -i "UltraStudio Recorder 3G"
-)
+FILTER_COMPLEX=""
 
-MAPS=( -map 1:v )
-for _ in $(seq 1 36); do MAPS+=( -map 0:a ); done
+if [[ "${AUDIO_MODE}" == "sdi" ]]; then
+  # SDI embedded stereo only (DeckLink), generate 36 outputs: a:0 stereo, a:1..a:34 mono downmix, a:35 stereo
+  COMMON_INPUTS=(
+    -hide_banner -y
+    -progress "$PROG_FILE"
+    -thread_queue_size 512 -format_code Hi50 -f decklink -i "UltraStudio Recorder 3G"
+  )
+  MAPS=( -map 0:v )
+  # Build filter_complex: split stereo into 36 branches
+  # labels: s0 (stereo first), m1..m34 mono, s35 (stereo last)
+  # Build the split/labels string portably (avoid echo -n issues)
+  SPLIT_LABELS="[0:a:0]asplit=36[s0]"
+  for i in $(seq 1 34); do SPLIT_LABELS+="[m${i}]"; done
+  SPLIT_LABELS+="[s35]"
+  # Compose the rest
+  FILTER_COMPLEX="${FILTER_COMPLEX}${SPLIT_LABELS};"
+  FILTER_COMPLEX+="[s0]aformat=fltp,pan=stereo|c0=c0|c1=c1,volume=3dB[out0];"
+  for i in $(seq 1 34); do
+    FILTER_COMPLEX+="[m${i}]pan=mono|c0=0.5*c0+0.5*c1,volume=9dB[out${i}];"
+  done
+  FILTER_COMPLEX+="[s35]aformat=fltp,pan=stereo|c0=c0|c1=c1,volume=9dB[out35]"
+  # maps for 36 audio outs
+  for i in $(seq 0 35); do MAPS+=( -map "[out${i}]" ); done
+  FILTERS=( -g 12 -filter_complex "$FILTER_COMPLEX" )
+else
+  # Audio: DVS 64ch (big-endian) -> 36 output tracks (0: stereo, then many mono, last stereo)
+  COMMON_INPUTS=(
+    -hide_banner -y
+    -progress "$PROG_FILE"
+    -thread_queue_size 512 -big_endian 1 -f audiotoolbox -i "AUDINATE-DVS-UID"
+    -thread_queue_size 512 -format_code Hi50 -f decklink -i "UltraStudio Recorder 3G"
+  )
 
-FILTERS=(
-  -g 12
-  -filter:1  "pan=stereo|c0=c0|c1=c1,volume=9dB"
-  -filter:2  "pan=mono|c0=c2,volume=9dB"
-  -filter:3  "pan=mono|c0=c3,volume=9dB"
-  -filter:4  "pan=mono|c0=c4,volume=9dB"
-  -filter:5  "pan=mono|c0=c5,volume=9dB"
-  -filter:6  "pan=mono|c0=c6,volume=9dB"
-  -filter:7  "pan=mono|c0=c7,volume=9dB"
-  -filter:8  "pan=mono|c0=c8,volume=9dB"
-  -filter:9  "pan=mono|c0=c9,volume=9dB"
-  -filter:10 "pan=mono|c0=c10,volume=9dB"
-  -filter:11 "pan=mono|c0=c11,volume=9dB"
-  -filter:12 "pan=mono|c0=c12,volume=9dB"
-  -filter:13 "pan=mono|c0=c13,volume=9dB"
-  -filter:14 "pan=mono|c0=c14,volume=9dB"
-  -filter:15 "pan=mono|c0=c15,volume=9dB"
-  -filter:16 "pan=mono|c0=c16,volume=9dB"
-  -filter:17 "pan=mono|c0=c17,volume=9dB"
-  -filter:18 "pan=mono|c0=c18,volume=9dB"
-  -filter:19 "pan=mono|c0=c19,volume=9dB"
-  -filter:20 "pan=mono|c0=c20,volume=9dB"
-  -filter:21 "pan=mono|c0=c21,volume=9dB"
-  -filter:22 "pan=mono|c0=c22,volume=9dB"
-  -filter:23 "pan=mono|c0=c23,volume=9dB"
-  -filter:24 "pan=mono|c0=c24,volume=9dB"
-  -filter:25 "pan=mono|c0=c25,volume=9dB"
-  -filter:26 "pan=mono|c0=c26,volume=9dB"
-  -filter:27 "pan=mono|c0=c27,volume=9dB"
-  -filter:28 "pan=mono|c0=c28,volume=9dB"
-  -filter:29 "pan=mono|c0=c29,volume=9dB"
-  # 30/31 reserved for stereo below
-  -filter:30 "pan=mono|c0=c32,volume=9dB"
-  -filter:31 "pan=mono|c0=c33,volume=9dB"
-  -filter:32 "pan=mono|c0=c34,volume=9dB"
-  -filter:33 "pan=mono|c0=c35,volume=9dB"
-  -filter:34 "pan=mono|c0=c36,volume=9dB"
-  -filter:35 "pan=mono|c0=c37,volume=9dB"
-  -filter:36 "pan=stereo|c0=c30|c1=c31,volume=9dB"
-)
+  MAPS=( -map 1:v )
+  for _ in $(seq 1 36); do MAPS+=( -map 0:a ); done
+
+  FILTERS=(
+    -g 12
+    -filter:1  "pan=stereo|c0=c0|c1=c1,volume=3dB"
+    -filter:2  "pan=mono|c0=c2,volume=9dB"
+    -filter:3  "pan=mono|c0=c3,volume=9dB"
+    -filter:4  "pan=mono|c0=c4,volume=9dB"
+    -filter:5  "pan=mono|c0=c5,volume=9dB"
+    -filter:6  "pan=mono|c0=c6,volume=9dB"
+    -filter:7  "pan=mono|c0=c7,volume=9dB"
+    -filter:8  "pan=mono|c0=c8,volume=9dB"
+    -filter:9  "pan=mono|c0=c9,volume=9dB"
+    -filter:10 "pan=mono|c0=c10,volume=9dB"
+    -filter:11 "pan=mono|c0=c11,volume=9dB"
+    -filter:12 "pan=mono|c0=c12,volume=9dB"
+    -filter:13 "pan=mono|c0=c13,volume=9dB"
+    -filter:14 "pan=mono|c0=c14,volume=9dB"
+    -filter:15 "pan=mono|c0=c15,volume=9dB"
+    -filter:16 "pan=mono|c0=c16,volume=9dB"
+    -filter:17 "pan=mono|c0=c17,volume=9dB"
+    -filter:18 "pan=mono|c0=c18,volume=9dB"
+    -filter:19 "pan=mono|c0=c19,volume=9dB"
+    -filter:20 "pan=mono|c0=c20,volume=9dB"
+    -filter:21 "pan=mono|c0=c21,volume=9dB"
+    -filter:22 "pan=mono|c0=c22,volume=9dB"
+    -filter:23 "pan=mono|c0=c23,volume=9dB"
+    -filter:24 "pan=mono|c0=c24,volume=9dB"
+    -filter:25 "pan=mono|c0=c25,volume=9dB"
+    -filter:26 "pan=mono|c0=c26,volume=9dB"
+    -filter:27 "pan=mono|c0=c27,volume=9dB"
+    -filter:28 "pan=mono|c0=c28,volume=9dB"
+    -filter:29 "pan=mono|c0=c29,volume=9dB"
+    # 30/31 reserved for stereo below
+    -filter:30 "pan=mono|c0=c32,volume=9dB"
+    -filter:31 "pan=mono|c0=c33,volume=9dB"
+    -filter:32 "pan=mono|c0=c34,volume=9dB"
+    -filter:33 "pan=mono|c0=c35,volume=9dB"
+    -filter:34 "pan=mono|c0=c36,volume=9dB"
+    -filter:35 "pan=mono|c0=c37,volume=9dB"
+    -filter:36 "pan=stereo|c0=c30|c1=c31,volume=9dB"
+  )
+fi
 
 META=(
   -metadata "network=archiveb"

@@ -1,0 +1,43 @@
+{
+  "outputs": [
+    { "id": "heb_L", "jack_port": 20, "source": { "type": "lang", "name": "he", "channel": "L" } },
+    { "id": "heb_R", "jack_port": 21, "source": { "type": "lang", "name": "he", "channel": "R" } },
+    { "id": "en",     "jack_port": 29, "source": { "type": "lang", "name": "en", "channel": "mono" } },
+    { "id": "ru",     "jack_port": 22, "source": { "type": "lang", "name": "ru", "channel": "mono" } },
+    { "id": "es",     "jack_port": 30, "source": { "type": "lang", "name": "es", "channel": "mono" } },
+    { "id": "fr",     "jack_port": 1,  "source": { "type": "lang", "name": "fr", "channel": "mono" } },
+    { "id": "it",     "jack_port": 2,  "source": { "type": "lang", "name": "it", "channel": "mono" } },
+    { "id": "de",     "jack_port": 3,  "source": { "type": "lang", "name": "de", "channel": "mono" } },
+    { "id": "tr",     "jack_port": 4,  "source": { "type": "lang", "name": "tr", "channel": "mono" } },
+    { "id": "pt",     "jack_port": 5,  "source": { "type": "lang", "name": "pt", "channel": "mono" } },
+    { "id": "bg",     "jack_port": 6,  "source": { "type": "lang", "name": "bg", "channel": "mono" } },
+    { "id": "ka",     "jack_port": 7,  "source": { "type": "lang", "name": "ka", "channel": "mono" } },
+    { "id": "ro",     "jack_port": 8,  "source": { "type": "lang", "name": "ro", "channel": "mono" } },
+    { "id": "hu",     "jack_port": 9,  "source": { "type": "lang", "name": "hu", "channel": "mono" } },
+    { "id": "sv",     "jack_port": 10, "source": { "type": "lang", "name": "sv", "channel": "mono" } },
+    { "id": "lt",     "jack_port": 11, "source": { "type": "lang", "name": "lt", "channel": "mono" } },
+    { "id": "hr",     "jack_port": 12, "source": { "type": "lang", "name": "hr", "channel": "mono" } },
+    { "id": "ja",     "jack_port": 13, "source": { "type": "lang", "name": "ja", "channel": "mono" } },
+    { "id": "sl",     "jack_port": 14, "source": { "type": "lang", "name": "sl", "channel": "mono" } },
+    { "id": "pl",     "jack_port": 15, "source": { "type": "lang", "name": "pl", "channel": "mono" } },
+    { "id": "no",     "jack_port": 16, "source": { "type": "lang", "name": "no", "channel": "mono" } },
+    { "id": "lv",     "jack_port": 17, "source": { "type": "lang", "name": "lv", "channel": "mono" } },
+    { "id": "uk",     "jack_port": 18, "source": { "type": "lang", "name": "uk", "channel": "mono" } },
+    { "id": "nl",     "jack_port": 19, "source": { "type": "lang", "name": "nl", "channel": "mono" } },
+    { "id": "zh",     "jack_port": 23, "source": { "type": "lang", "name": "zh", "channel": "mono" } },
+    { "id": "am",     "jack_port": 24, "source": { "type": "lang", "name": "am", "channel": "mono" } },
+    { "id": "hi",     "jack_port": 25, "source": { "type": "lang", "name": "hi", "channel": "mono" } },
+    { "id": "fa",     "jack_port": 26, "source": { "type": "lang", "name": "fa", "channel": "mono" } },
+    { "id": "ar",     "jack_port": 27, "source": { "type": "lang", "name": "ar", "channel": "mono" } },
+    { "id": "id",     "jack_port": 28, "source": { "type": "lang", "name": "id", "channel": "mono" } },
+    { "id": "hy",     "jack_port": 32, "source": { "type": "lang", "name": "hy", "channel": "mono" } },
+    { "id": "da",     "jack_port": 33, "source": { "type": "lang", "name": "da", "channel": "mono" } },
+    { "id": "et",     "jack_port": 34, "source": { "type": "lang", "name": "et", "channel": "mono" } },
+    { "id": "el",     "jack_port": 35, "source": { "type": "lang", "name": "el", "channel": "mono" } },
+    { "id": "tl",     "jack_port": 36, "source": { "type": "lang", "name": "tl", "channel": "mono" } },
+    { "id": "az",     "jack_port": 37, "source": { "type": "lang", "name": "az", "channel": "mono" } }
+  ],
+  "fallback": { "type": "silence" }
+}
+
+

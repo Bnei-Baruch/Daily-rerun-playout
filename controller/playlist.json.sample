@@ -1,0 +1,18 @@
+{
+  "items": [
+    {
+      "path": "/opt/backup/latest/lesson-1.mp4",
+      "map": {
+        "he": 0,
+        "en": 1,
+        "ru": 2
+      }
+    },
+    {
+      "path": "/opt/backup/latest/lesson-2.mp4"
+    }
+  ]
+}
+
+
+
