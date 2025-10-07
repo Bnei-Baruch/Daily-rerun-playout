@@ -30,7 +30,11 @@ fi
 
 # Best-effort presence check (non-fatal)
 if ! /usr/local/bin/ffmpeg-bb -hide_banner -f audiotoolbox -list_devices 1 -i "" 2>&1 | grep -q "$CAPTURE_DEV"; then
-  echo "Warning: '$CAPTURE_DEV' not detected; starting jackd anyway."
+  echo "Warning: '$CAPTURE_DEV' not detected; retrying in 3s..."
+  sleep 3
+  if ! /usr/local/bin/ffmpeg-bb -hide_banner -f audiotoolbox -list_devices 1 -i "" 2>&1 | grep -q "$CAPTURE_DEV"; then
+    echo "Warning: '$CAPTURE_DEV' still not detected; starting jackd anyway."
+  fi
 fi
 
 nohup "$JACK" -R -d coreaudio -C "$CAPTURE_DEV" -P "$PLAYBACK_DEV" \

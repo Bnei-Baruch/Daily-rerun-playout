@@ -19,12 +19,12 @@ import "C"
 import (
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/tinyzimmer/go-gst/gst"
@@ -347,9 +347,9 @@ func logBusErrors(label string, pipe *gst.Pipeline) {
 // decklinkvideosink. The bin exposes a single "sink" ghost pad.
 func buildDecklinkBin() (*gst.Bin, error) {
 	modeID := decklinkModeEnum(decklinkModeString())
-	deviceID := decklinkDeviceNumber()
+	sinkIdent := decklinkSinkIdentifier()
 
-	desc := fmt.Sprintf("queue name=decklink_in max-size-buffers=0 max-size-bytes=0 max-size-time=0 leaky=2 ! interlace field-pattern=2:2 top-field-first=true ! videoconvert ! video/x-raw,format=UYVY,width=1920,height=1080,interlace-mode=interleaved,framerate=25/1 ! decklinkvideosink mode=%d device-number=%d sync=true", modeID, deviceID)
+	desc := fmt.Sprintf("queue name=decklink_in max-size-buffers=0 max-size-bytes=0 max-size-time=0 leaky=2 ! interlace field-pattern=2:2 top-field-first=true ! videoconvert ! video/x-raw,format=UYVY,width=1920,height=1080,interlace-mode=interleaved,framerate=25/1 ! decklinkvideosink mode=%d %s sync=true", modeID, sinkIdent)
 
 	parsed, err := gst.NewBinFromString(desc, false)
 	if err != nil {
@@ -774,6 +774,17 @@ func decklinkModeEnum(name string) int {
 	}
 }
 
+func decklinkSinkIdentifier() string {
+	if pid := strings.TrimSpace(os.Getenv("DECKLINK_PERSISTENT_ID")); pid != "" {
+		if _, err := strconv.ParseUint(pid, 10, 64); err != nil {
+			log.Printf("warning: invalid DECKLINK_PERSISTENT_ID=%q: %v", pid, err)
+		} else {
+			return fmt.Sprintf("persistent-id=%s", pid)
+		}
+	}
+	return fmt.Sprintf("device-number=%d", decklinkDeviceNumber())
+}
+
 func (m *goGstManager) refreshDecklinkChain() error {
 	if m.pipeline == nil {
 		return fmt.Errorf("pipeline not built")
@@ -792,6 +803,8 @@ func (m *goGstManager) refreshDecklinkChain() error {
 		return fmt.Errorf("build decklink bin: %w", err)
 	}
 
+	log.Printf("refreshDecklink: adding new decklink chain")
+
 	if err := m.pipeline.Add(deckChain.Element); err != nil {
 		return fmt.Errorf("add decklink bin: %w", err)
 	}
@@ -800,39 +813,42 @@ func (m *goGstManager) refreshDecklinkChain() error {
 		return fmt.Errorf("link selector to decklink: %w", err)
 	}
 
-	deckSource := deckChain.Element.GetStaticPad("src")
-	if deckSource == nil {
-		return fmt.Errorf("decklink chain missing src pad")
-	}
-
-	if !deckSource.SendEvent(gst.NewFlushStartEvent()) {
-		log.Printf("refreshDecklink: decklink flush-start failed")
-	}
-	if !deckSource.SendEvent(gst.NewFlushStopEvent(false)) {
-		log.Printf("refreshDecklink: decklink flush-stop failed")
-	}
-
-	streamID := fmt.Sprintf("lesson-%d", rand.Int63())
-	if !deckSource.SendEvent(gst.NewStreamStartEvent(streamID)) {
-		log.Printf("refreshDecklink: decklink stream-start failed")
-	}
-
-	seg := gst.NewSegment()
-	seg.Init(gst.FormatTime)
-	if !deckSource.SendEvent(gst.NewSegmentEvent(seg)) {
-		log.Printf("refreshDecklink: decklink segment failed")
-	}
+	_ = deckChain.Element.SetState(gst.StateReady)
 
 	queueElem, err := deckChain.GetElementByName("decklink_in")
-	if err == nil && queueElem != nil {
-		if sinkPad := queueElem.GetStaticPad("sink"); sinkPad != nil {
-			sinkPad.AddProbe(gst.PadProbeTypeBuffer, func(p *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
-				log.Printf("decklink queue buffer caps=%s", padCaps(p))
-				return gst.PadProbeRemove
-			})
-		}
+	if err != nil {
+		return fmt.Errorf("find decklink queue: %w", err)
+	}
+
+	sinkPad := queueElem.GetStaticPad("sink")
+	if sinkPad != nil {
+		primed := false
+		sinkPad.AddProbe(gst.PadProbeTypeBuffer, func(p *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+			if !primed {
+				log.Printf("refreshDecklink: priming decklink stream events")
+				if !p.SendEvent(gst.NewFlushStartEvent()) {
+					log.Printf("refreshDecklink: decklink queue flush-start failed")
+				}
+				if !p.SendEvent(gst.NewFlushStopEvent(false)) {
+					log.Printf("refreshDecklink: decklink queue flush-stop failed")
+				}
+				streamID := fmt.Sprintf("lesson-%d", time.Now().UnixNano())
+				if !p.SendEvent(gst.NewStreamStartEvent(streamID)) {
+					log.Printf("refreshDecklink: decklink queue stream-start failed")
+				}
+				seg := gst.NewSegment()
+				seg.Init(gst.FormatTime)
+				if !p.SendEvent(gst.NewSegmentEvent(seg)) {
+					log.Printf("refreshDecklink: decklink queue segment failed")
+				}
+				primed = true
+			}
+			log.Printf("decklink queue buffer caps=%s", padCaps(p))
+			return gst.PadProbeRemove
+		})
 	}
 
 	m.deckBin = deckChain.Element
+	log.Printf("refreshDecklink: decklink chain ready")
 	return nil
 }
