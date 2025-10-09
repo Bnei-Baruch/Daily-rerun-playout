@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROD_HOST="${PROD_HOST:-shidur@10.66.1.82}"
+PROD_HOST="${PROD_HOST:-shidur@10.66.1.144}"
 PROD_DIR="${PROD_DIR:-/Users/shidur/Projects/sviva-playout}"
 
 echo "[deploy-controller] building lesson-controller locally (GO_GST=1)"
