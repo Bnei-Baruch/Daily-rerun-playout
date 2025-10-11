@@ -205,6 +205,29 @@ func handleSourceLesson(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
+func handlePlaylistPrepare(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URLs []string `json:"urls"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.URLs) == 0 {
+		http.Error(w, "urls array is required", http.StatusBadRequest)
+		return
+	}
+	if err := manager.LoadPlaylist(Playlist{Items: urlsToPlaylistItems(req.URLs)}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "prepared",
+		"count":  len(req.URLs),
+	})
+}
+
 func handlePlaylistLoad(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		File string `json:"file"`
@@ -219,6 +242,14 @@ func handlePlaylistLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("OK"))
+}
+
+func urlsToPlaylistItems(urls []string) []PlaylistItem {
+	items := make([]PlaylistItem, len(urls))
+	for i, url := range urls {
+		items[i] = PlaylistItem{Path: url, Map: nil}
+	}
+	return items
 }
 
 func handlePlaylistStart(w http.ResponseWriter, r *http.Request) {
@@ -271,6 +302,7 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/source/png", handleSourcePNG).Methods(http.MethodPost)
 	r.HandleFunc("/source/lesson", handleSourceLesson).Methods(http.MethodPost)
+	r.HandleFunc("/playlist/prepare", handlePlaylistPrepare).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/load", handlePlaylistLoad).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/start", handlePlaylistStart).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/next", handlePlaylistNext).Methods(http.MethodPost)

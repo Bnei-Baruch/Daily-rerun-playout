@@ -61,37 +61,66 @@ else
 fi
 
 if [[ -x "$SRC_BIN" ]]; then
+  # Install binary to a private location
+  PRIVATE_BIN="$BIN_DST/.lesson-controller.bin"
   if [ "${USER_INSTALL:-0}" = "1" ]; then
-    echo "  symlink $SRC_BIN -> $BIN_DST/lesson-controller"
-    ln -sfn "$SRC_BIN" "$BIN_DST/lesson-controller"
+    echo "  symlink $SRC_BIN -> $PRIVATE_BIN"
+    ln -sfn "$SRC_BIN" "$PRIVATE_BIN"
   else
-    echo "  install $SRC_BIN -> $BIN_DST/lesson-controller"
-    install -m 0755 -o "$OWNER" -g "$GROUP" "$SRC_BIN" "$BIN_DST/lesson-controller"
+    echo "  install binary to $PRIVATE_BIN"
+    install -m 0755 -o "$OWNER" -g "$GROUP" "$SRC_BIN" "$PRIVATE_BIN"
   fi
 else
   echo "[install-controller] ERROR: no binary to install. Aborting without changes."
   exit 1
 fi
 
-# Wrapper runner
-WRAP="$BIN_DST/lesson_controller"
+# Create wrapper as the main executable
+WRAP="$BIN_DST/lesson-controller"
 if [ "${USER_INSTALL:-0}" = "1" ]; then
-  echo "  symlink runner $WRAP -> $BIN_DST/lesson-controller"
-  ln -sfn "$BIN_DST/lesson-controller" "$WRAP"
+  echo "  create user wrapper $WRAP"
+  cat > "$WRAP" <<SH
+#!/bin/sh
+set -e
+AUDIO_MAP_PATH="\${AUDIO_MAP_PATH:-$HOME/Projects/sviva-playout/controller/audio_map.json.sample}"
+PNG_PATH="\${PNG_PATH:-$HOME/shidur.png}"
+DECKLINK_DEVICE="\${DECKLINK_DEVICE:-0}"
+DECKLINK_MODE="\${DECKLINK_MODE:-1080i50}"
+PLAYLIST_DIR="\${PLAYLIST_DIR:-$HOME/playlist}"
+FFMPEG_PATH="\${FFMPEG_PATH:-/opt/homebrew/bin/ffmpeg}"
+PORT="\${PORT:-8788}"
+GO_GST="\${GO_GST:-1}"
+DYLD_LIBRARY_PATH="/opt/homebrew/lib\${DYLD_LIBRARY_PATH:+:\$DYLD_LIBRARY_PATH}"
+export AUDIO_MAP_PATH PNG_PATH DECKLINK_DEVICE DECKLINK_MODE PLAYLIST_DIR FFMPEG_PATH PORT GO_GST DYLD_LIBRARY_PATH
+exec "$PRIVATE_BIN" "\$@"
+SH
+  chmod 0755 "$WRAP"
   echo "[install-controller] done. Start with: $WRAP"
 else
-  echo "  create runner $WRAP"
+  echo "  create system wrapper $WRAP"
   cat > "$WRAP" <<'SH'
 #!/bin/sh
 set -e
 LOG_DIR="/opt/backup/logs"
 mkdir -p "$LOG_DIR"
+
+# Configuration defaults
 AUDIO_MAP_PATH="${AUDIO_MAP_PATH:-/Users/shidur/Projects/sviva-playout/controller/audio_map.json.sample}"
+PNG_PATH="${PNG_PATH:-/Users/shidur/shidur.png}"
+DECKLINK_DEVICE="${DECKLINK_DEVICE:-0}"
+DECKLINK_MODE="${DECKLINK_MODE:-1080i50}"
+PLAYLIST_DIR="${PLAYLIST_DIR:-/opt/backup/playlist}"
+FFMPEG_PATH="${FFMPEG_PATH:-/opt/homebrew/bin/ffmpeg}"
 PORT="${PORT:-8788}"
 GO_GST="${GO_GST:-1}"
-export AUDIO_MAP_PATH
-export GO_GST
-exec /usr/local/bin/lesson-controller "$@" 2>>"$LOG_DIR/lesson_controller.err" 1>>"$LOG_DIR/lesson_controller.out"
+
+# macOS dynamic library path for JACK/GStreamer
+DYLD_LIBRARY_PATH="/opt/homebrew/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+
+# Export all configuration
+export AUDIO_MAP_PATH PNG_PATH DECKLINK_DEVICE DECKLINK_MODE PLAYLIST_DIR FFMPEG_PATH PORT GO_GST DYLD_LIBRARY_PATH
+
+exec /usr/local/bin/.lesson-controller.bin "$@" 2>>"$LOG_DIR/lesson_controller.err" 1>>"$LOG_DIR/lesson_controller.out"
 SH
   chown "$OWNER:$GROUP" "$WRAP"
   chmod 0755 "$WRAP"

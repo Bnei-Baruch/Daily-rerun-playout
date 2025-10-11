@@ -24,7 +24,24 @@ else
   go build -o lesson-controller
 fi
 
-echo "Starting controller..."
+# Set default environment variables if not already set
+: "${AUDIO_MAP_PATH:=$CONTROLLER_DIR/audio_map.json.sample}"
+: "${PNG_PATH:=/Users/shidur/shidur.png}"
+: "${DECKLINK_DEVICE:=0}"
+: "${DECKLINK_MODE:=1080i50}"
+: "${PLAYLIST_DIR:=/opt/backup/playlist}"
+: "${FFMPEG_PATH:=/opt/homebrew/bin/ffmpeg}"
+: "${PORT:=8788}"
+: "${DYLD_LIBRARY_PATH:=/opt/homebrew/lib}"
+
+export AUDIO_MAP_PATH PNG_PATH DECKLINK_DEVICE DECKLINK_MODE PLAYLIST_DIR FFMPEG_PATH PORT DYLD_LIBRARY_PATH
+
+echo "Starting controller with:"
+echo "  AUDIO_MAP_PATH=$AUDIO_MAP_PATH"
+echo "  PNG_PATH=$PNG_PATH"
+echo "  DECKLINK_DEVICE=$DECKLINK_DEVICE"
+echo "  DECKLINK_MODE=$DECKLINK_MODE"
+echo "  PORT=$PORT"
 exec ./lesson-controller
 
 
