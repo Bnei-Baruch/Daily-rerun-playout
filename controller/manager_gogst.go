@@ -17,6 +17,7 @@ static gboolean set_active_pad(GstElement *sel, GstPad *pad) {
 import "C"
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -66,10 +67,67 @@ func NewGoGstManager(m AudioMap) *goGstManager {
 	if playlistDir == "" {
 		playlistDir = "/opt/backup/playlist"
 	}
-	return &goGstManager{
+	mgr := &goGstManager{
 		audioMap:    m,
 		playlistDir: playlistDir,
 	}
+	// Try to load existing playlist on startup
+	if err := mgr.loadPlaylistMetadata(); err != nil {
+		log.Printf("NewGoGstManager: no saved playlist found (this is normal on first run)")
+	} else {
+		log.Printf("NewGoGstManager: loaded saved playlist with %d items", len(mgr.playlist.Items))
+	}
+	return mgr
+}
+
+// playlistMetadataPath returns the path to the playlist metadata JSON file
+func (m *goGstManager) playlistMetadataPath() string {
+	return filepath.Join(m.playlistDir, "playlist.json")
+}
+
+// savePlaylistMetadata saves the current playlist to disk
+func (m *goGstManager) savePlaylistMetadata() error {
+	metaPath := m.playlistMetadataPath()
+	data, err := json.MarshalIndent(m.playlist, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal playlist: %w", err)
+	}
+	if err := os.WriteFile(metaPath, data, 0644); err != nil {
+		return fmt.Errorf("write playlist metadata: %w", err)
+	}
+	log.Printf("savePlaylistMetadata: saved to %s", metaPath)
+	return nil
+}
+
+// loadPlaylistMetadata loads the playlist from disk
+func (m *goGstManager) loadPlaylistMetadata() error {
+	metaPath := m.playlistMetadataPath()
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return fmt.Errorf("read playlist metadata: %w", err)
+	}
+	var p Playlist
+	if err := json.Unmarshal(data, &p); err != nil {
+		return fmt.Errorf("unmarshal playlist: %w", err)
+	}
+	
+	// Verify all files still exist
+	validItems := []PlaylistItem{}
+	for _, item := range p.Items {
+		if _, err := os.Stat(item.Path); err == nil {
+			validItems = append(validItems, item)
+		} else {
+			log.Printf("loadPlaylistMetadata: skipping missing file: %s", item.Path)
+		}
+	}
+	
+	if len(validItems) == 0 {
+		return fmt.Errorf("no valid playlist files found")
+	}
+	
+	m.playlist = Playlist{Items: validItems}
+	log.Printf("loadPlaylistMetadata: loaded %d items from %s", len(validItems), metaPath)
+	return nil
 }
 
 func (m *goGstManager) BuildPipeline() error {
@@ -1200,6 +1258,10 @@ func (m *goGstManager) LoadPlaylist(p Playlist) error {
 	// Only lock when storing the final playlist metadata (quick operation)
 	m.mu.Lock()
 	m.playlist = Playlist{Items: downloadedItems}
+	// Save playlist metadata to disk for persistence
+	if err := m.savePlaylistMetadata(); err != nil {
+		log.Printf("warn: failed to save playlist metadata: %v", err)
+	}
 	m.mu.Unlock()
 
 	log.Printf("LoadPlaylist: prepared %d files in %s", len(downloadedItems), m.playlistDir)
@@ -1285,7 +1347,7 @@ func (m *goGstManager) StartPlaylist() error {
 	if prerunPath == "" {
 		prerunPath = "/opt/backup/prerun.mp4"
 	}
-	
+
 	// Check if prerun video exists
 	hasPrerun := false
 	if _, err := os.Stat(prerunPath); err == nil {
