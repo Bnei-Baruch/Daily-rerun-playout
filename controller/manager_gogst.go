@@ -110,7 +110,7 @@ func (m *goGstManager) loadPlaylistMetadata() error {
 	if err := json.Unmarshal(data, &p); err != nil {
 		return fmt.Errorf("unmarshal playlist: %w", err)
 	}
-	
+
 	// Verify all files still exist
 	validItems := []PlaylistItem{}
 	for _, item := range p.Items {
@@ -120,11 +120,11 @@ func (m *goGstManager) loadPlaylistMetadata() error {
 			log.Printf("loadPlaylistMetadata: skipping missing file: %s", item.Path)
 		}
 	}
-	
+
 	if len(validItems) == 0 {
 		return fmt.Errorf("no valid playlist files found")
 	}
-	
+
 	m.playlist = Playlist{Items: validItems}
 	log.Printf("loadPlaylistMetadata: loaded %d items from %s", len(validItems), metaPath)
 	return nil
