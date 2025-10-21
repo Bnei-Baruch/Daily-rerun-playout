@@ -1191,22 +1191,6 @@ func (m *goGstManager) LoadPlaylist(p Playlist) error {
 			Path: filePath,
 			Map:  item.Map,
 		})
-
-		// Extract last frame as PNG using ffmpeg
-		pngPath := filepath.Join(m.playlistDir, fmt.Sprintf("last_frame-%d.png", urlNum))
-		log.Printf("LoadPlaylist: extracting last frame to %s", pngPath)
-
-		ffmpegPath := os.Getenv("FFMPEG_PATH")
-		if ffmpegPath == "" {
-			ffmpegPath = "/opt/homebrew/bin/ffmpeg"
-		}
-
-		// Get last frame: ffmpeg -sseof -1 -i input.mp4 -frames:v 1 output.png
-		cmdFFmpeg := exec.Command(ffmpegPath, "-sseof", "-1", "-i", filePath, "-frames:v", "1", "-y", pngPath)
-		if err := cmdFFmpeg.Run(); err != nil {
-			log.Printf("warn: failed to extract last frame for URL %d: %v", urlNum, err)
-			// Continue anyway - playlist will work without the PNG freeze frames
-		}
 	}
 
 	if len(downloadedItems) == 0 {
@@ -1296,26 +1280,39 @@ func (m *goGstManager) StartPlaylist() error {
 	pipeline += " audio_tee. ! queue ! jackaudiosink client-name=gst-tl    port-pattern=36 sync=false"
 	pipeline += " audio_tee. ! queue ! jackaudiosink client-name=gst-az    port-pattern=37 sync=false"
 
-	// For each playlist item, add: video file → PNG freeze frame (30 sec)
+	// Get prerun video path from environment
+	prerunPath := os.Getenv("PRERUN_VIDEO_PATH")
+	if prerunPath == "" {
+		prerunPath = "/opt/backup/prerun.mp4"
+	}
+	
+	// Check if prerun video exists
+	hasPrerun := false
+	if _, err := os.Stat(prerunPath); err == nil {
+		hasPrerun = true
+		log.Printf("StartPlaylist: using prerun video: %s", prerunPath)
+	} else {
+		log.Printf("StartPlaylist: no prerun video found at %s, skipping prerun", prerunPath)
+	}
+
+	// For each playlist item, add: 30-sec prerun video → lesson video
 	sinkIndex := 0
 	for i, item := range m.playlist.Items {
 		itemNum := i + 1
 
-		// Add video file
+		// Add 30-second prerun video before each lesson
+		if hasPrerun {
+			pipeline += fmt.Sprintf(" filesrc location=\"%s\" ! qtdemux name=pre%d", prerunPath, itemNum)
+			pipeline += fmt.Sprintf(" pre%d.video_0 ! queue ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! identity eos-after=%d ! vcat.sink_%d", itemNum, fps, freezeFrames, sinkIndex)
+			sinkIndex++
+			pipeline += fmt.Sprintf(" pre%d.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! identity eos-after=%d ! acat.sink_%d", itemNum, audioBuffers, sinkIndex-1)
+		}
+
+		// Add lesson video file
 		pipeline += fmt.Sprintf(" filesrc location=\"%s\" ! qtdemux name=u%d", item.Path, itemNum)
 		pipeline += fmt.Sprintf(" u%d.video_0 ! queue ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! vcat.sink_%d", itemNum, fps, sinkIndex)
 		sinkIndex++
 		pipeline += fmt.Sprintf(" u%d.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_%d", itemNum, sinkIndex-1)
-
-		// Add PNG freeze frame (30 seconds)
-		pngPath := filepath.Join(m.playlistDir, fmt.Sprintf("last_frame-%d.png", itemNum))
-		if _, err := os.Stat(pngPath); err == nil {
-			pipeline += fmt.Sprintf(" filesrc location=\"%s\" ! decodebin ! queue ! imagefreeze ! videoscale ! videoconvert ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! identity eos-after=%d ! vcat.sink_%d", pngPath, fps, freezeFrames, sinkIndex)
-			sinkIndex++
-			pipeline += fmt.Sprintf(" audiotestsrc wave=silence samplesperbuffer=480 num-buffers=%d ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_%d", audioBuffers, sinkIndex-1)
-		} else {
-			log.Printf("warn: no PNG freeze frame for item %d", itemNum)
-		}
 	}
 
 	log.Printf("StartPlaylist: parsing concat pipeline...")
