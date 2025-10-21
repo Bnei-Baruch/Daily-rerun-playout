@@ -1166,6 +1166,13 @@ func (m *goGstManager) busWatchLesson() {
 			return
 		}
 
+		// Check if this is still a lesson pipeline (not switched to playlist)
+		pipeName := pipe.GetName()
+		if pipeName != "lesson-only" {
+			log.Printf("busWatchLesson: pipeline changed to %s, stopping watch", pipeName)
+			return
+		}
+
 		bus := pipe.GetBus()
 		if bus == nil {
 			time.Sleep(100 * time.Millisecond)
@@ -1414,6 +1421,13 @@ func (m *goGstManager) busWatchPlaylist() {
 		m.mu.Unlock()
 
 		if pipe == nil {
+			return
+		}
+
+		// Check if this is still a playlist pipeline (not switched to lesson-only)
+		pipeName := pipe.GetName()
+		if pipeName != "playlist-pipeline" {
+			log.Printf("busWatchPlaylist: pipeline changed to %s, stopping watch", pipeName)
 			return
 		}
 
