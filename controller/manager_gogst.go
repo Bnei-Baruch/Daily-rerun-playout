@@ -1113,6 +1113,8 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 
 	if err := pipe.SetState(gst.StatePlaying); err != nil {
 		logBusErrors("pipeline", pipe)
+		// Clean up the pipeline on failure to avoid stale JACK connections
+		_ = pipe.SetState(gst.StateNull)
 		return fmt.Errorf("set PLAYING: %w", err)
 	}
 
@@ -1397,6 +1399,8 @@ func (m *goGstManager) StartPlaylist() error {
 	log.Printf("StartPlaylist: starting pipeline...")
 	if err := pipe.SetState(gst.StatePlaying); err != nil {
 		logBusErrors("playlist-pipeline", pipe)
+		// Clean up the pipeline on failure to avoid stale JACK connections
+		_ = pipe.SetState(gst.StateNull)
 		return fmt.Errorf("set PLAYING: %w", err)
 	}
 
