@@ -1173,12 +1173,16 @@ func (m *goGstManager) LoadPlaylist(p Playlist) error {
 		filename := fmt.Sprintf("url_%d.mp4", urlNum)
 		filePath := filepath.Join(m.playlistDir, filename)
 
-		log.Printf("LoadPlaylist: downloading %d/%d: %s", urlNum, len(p.Items), item.Path)
+		// Trim whitespace from URL
+		url := strings.TrimSpace(item.Path)
+		log.Printf("LoadPlaylist: downloading %d/%d: %s", urlNum, len(p.Items), url)
 
 		// Download using curl
-		cmd := exec.Command("curl", "-L", "-o", filePath, item.Path)
-		if err := cmd.Run(); err != nil {
+		cmd := exec.Command("curl", "-L", "-o", filePath, url)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
 			log.Printf("warn: download failed for URL %d: %v", urlNum, err)
+			log.Printf("warn: curl output: %s", string(output))
 			continue
 		}
 
