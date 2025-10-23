@@ -1137,19 +1137,28 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 		return fmt.Errorf("add lesson-only bin: %w", err)
 	}
 
+	log.Printf("buildLessonOnlyPipeline: starting pipeline (preroll may take 10-60 seconds)...")
+	startTime := time.Now()
+
 	if err := pipe.SetState(gst.StatePlaying); err != nil {
+		// Check for JACK errors BEFORE logBusErrors consumes the messages
+		isJackError := checkBusForJackError(pipe)
+
 		logBusErrors("pipeline", pipe)
 		// Clean up the pipeline on failure to avoid stale JACK connections
 		_ = pipe.SetState(gst.StateNull)
 
-		// Check if it's a JACK connection error and suggest restart
-		if isJackConnectionError(pipe) {
+		// Suggest JACK restart if it's a JACK connection error
+		if isJackError {
 			log.Printf("buildLessonOnlyPipeline: JACK connection error detected - JACK may need restart")
-			log.Printf("buildLessonOnlyPipeline: Run: pkill -9 jackd && /opt/homebrew/bin/jackd -R -d coreaudio -C AUDINATE-DVS-UID -P AUDINATE-DVS-UID -r 48000 -p 256 -n 3 &")
+			log.Printf("buildLessonOnlyPipeline: To fix, run: pkill -9 jackd && /opt/homebrew/bin/jackd -R -d coreaudio -C AUDINATE-DVS-UID -P AUDINATE-DVS-UID -r 48000 -p 256 -n 3 &")
 		}
 
 		return fmt.Errorf("set PLAYING: %w", err)
 	}
+
+	elapsed := time.Since(startTime)
+	log.Printf("buildLessonOnlyPipeline: pipeline started successfully in %.1f seconds", elapsed.Seconds())
 
 	m.pipeline = pipe
 	m.vsel = nil
@@ -1532,20 +1541,28 @@ func (m *goGstManager) StartPlaylist() error {
 		return fmt.Errorf("add playlist bin: %w", err)
 	}
 
-	log.Printf("StartPlaylist: starting pipeline...")
+	log.Printf("StartPlaylist: starting pipeline (preroll may take 10-60 seconds)...")
+	startTime := time.Now()
+
 	if err := pipe.SetState(gst.StatePlaying); err != nil {
+		// Check for JACK errors BEFORE logBusErrors consumes the messages
+		isJackError := checkBusForJackError(pipe)
+
 		logBusErrors("playlist-pipeline", pipe)
 		// Clean up the pipeline on failure to avoid stale JACK connections
 		_ = pipe.SetState(gst.StateNull)
 
-		// Check if it's a JACK connection error and suggest restart
-		if isJackConnectionError(pipe) {
+		// Suggest JACK restart if it's a JACK connection error
+		if isJackError {
 			log.Printf("StartPlaylist: JACK connection error detected - JACK may need restart")
-			log.Printf("StartPlaylist: Run: pkill -9 jackd && /opt/homebrew/bin/jackd -R -d coreaudio -C AUDINATE-DVS-UID -P AUDINATE-DVS-UID -r 48000 -p 256 -n 3 &")
+			log.Printf("StartPlaylist: To fix, run: pkill -9 jackd && /opt/homebrew/bin/jackd -R -d coreaudio -C AUDINATE-DVS-UID -P AUDINATE-DVS-UID -r 48000 -p 256 -n 3 &")
 		}
 
 		return fmt.Errorf("set PLAYING: %w", err)
 	}
+
+	elapsed := time.Since(startTime)
+	log.Printf("StartPlaylist: pipeline started successfully in %.1f seconds", elapsed.Seconds())
 
 	m.pipeline = pipe
 	m.vsel = nil
@@ -1834,8 +1851,8 @@ func (m *goGstManager) getVideoDuration(filePath string) string {
 	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
 }
 
-// isJackConnectionError checks if the pipeline failed due to JACK connection issues
-func isJackConnectionError(pipe *gst.Pipeline) bool {
+// checkBusForJackError peeks at the bus for JACK-related errors without consuming messages
+func checkBusForJackError(pipe *gst.Pipeline) bool {
 	if pipe == nil {
 		return false
 	}
@@ -1845,8 +1862,8 @@ func isJackConnectionError(pipe *gst.Pipeline) bool {
 		return false
 	}
 
-	// Check for error messages related to JACK
-	msg := bus.TimedPop(100 * time.Millisecond)
+	// Peek at error messages without removing them from the bus
+	msg := bus.Peek()
 	if msg == nil {
 		return false
 	}
