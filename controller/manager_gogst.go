@@ -250,10 +250,36 @@ func (m *goGstManager) SwitchToLesson(path string, loop bool, trackMap map[strin
 func (m *goGstManager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	if m.pipeline != nil {
-		_ = m.pipeline.SetState(gst.StateNull)
+		log.Printf("Stop: setting pipeline to NULL state to clean up JACK connections...")
+
+		// First pause, then set to NULL for proper cleanup
+		_ = m.pipeline.SetState(gst.StatePaused)
+		time.Sleep(100 * time.Millisecond)
+
+		if err := m.pipeline.SetState(gst.StateNull); err != nil {
+			log.Printf("Stop: error setting pipeline to NULL: %v", err)
+		}
+
+		// Wait a bit for cleanup to complete
+		time.Sleep(200 * time.Millisecond)
+
 		m.pipeline = nil
+		log.Printf("Stop: pipeline stopped and JACK connections cleaned up")
 	}
+
+	// Clear all references
+	m.vsel = nil
+	m.deckBin = nil
+	m.lessonBin = nil
+	m.lessonPad = nil
+	m.lessonSinkPad = nil
+	m.lessonDecode = nil
+	m.pngBin = nil
+	m.pngPad = nil
+	m.pngSinkPad = nil
+
 	return nil
 }
 
@@ -1115,6 +1141,13 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 		logBusErrors("pipeline", pipe)
 		// Clean up the pipeline on failure to avoid stale JACK connections
 		_ = pipe.SetState(gst.StateNull)
+
+		// Check if it's a JACK connection error and suggest restart
+		if isJackConnectionError(pipe) {
+			log.Printf("buildLessonOnlyPipeline: JACK connection error detected - JACK may need restart")
+			log.Printf("buildLessonOnlyPipeline: Run: pkill -9 jackd && /opt/homebrew/bin/jackd -R -d coreaudio -C AUDINATE-DVS-UID -P AUDINATE-DVS-UID -r 48000 -p 256 -n 3 &")
+		}
+
 		return fmt.Errorf("set PLAYING: %w", err)
 	}
 
@@ -1244,8 +1277,13 @@ func (m *goGstManager) LoadPlaylist(p Playlist) error {
 		url := strings.TrimSpace(item.Path)
 		log.Printf("LoadPlaylist: downloading %d/%d: %s", urlNum, len(p.Items), url)
 
-		// Download using curl
-		cmd := exec.Command("curl", "-L", "-o", filePath, url)
+		// Download using curl with verbose output to capture original filename
+		// Use -w to get final URL and Content-Disposition header
+		infoFile := filepath.Join(m.playlistDir, fmt.Sprintf("url_%d_info.txt", urlNum))
+		cmd := exec.Command("curl", "-L", "-o", filePath,
+			"-w", "final_url: %{url_effective}\n",
+			"-D", infoFile, // Save headers
+			url)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			log.Printf("warn: download failed for URL %d: %v", urlNum, err)
@@ -1254,9 +1292,92 @@ func (m *goGstManager) LoadPlaylist(p Playlist) error {
 		}
 
 		log.Printf("LoadPlaylist: download successful: %s", filePath)
+
+		// Extract original filename and final URL
+		originalName := ""
+		finalURL := ""
+
+		// Parse the info file for Content-Disposition and final URL
+		if infoData, err := os.ReadFile(infoFile); err == nil {
+			infoStr := string(infoData)
+
+			// Look for Content-Disposition header
+			for _, line := range strings.Split(infoStr, "\n") {
+				if strings.Contains(strings.ToLower(line), "content-disposition:") {
+					// Extract filename from Content-Disposition: attachment; filename="..."
+					if idx := strings.Index(line, "filename="); idx != -1 {
+						filename := line[idx+9:]
+						filename = strings.Trim(filename, `"' `)
+						filename = strings.TrimSpace(filename)
+						if filename != "" {
+							originalName = filename
+							log.Printf("LoadPlaylist: extracted filename from Content-Disposition: %s", originalName)
+						}
+					}
+				}
+			}
+
+			// Clean up info file
+			_ = os.Remove(infoFile)
+		}
+
+		// Get final URL from curl output
+		if strings.Contains(string(output), "final_url:") {
+			lines := strings.Split(string(output), "\n")
+			for _, line := range lines {
+				if strings.HasPrefix(line, "final_url:") {
+					finalURL = strings.TrimSpace(strings.TrimPrefix(line, "final_url:"))
+					log.Printf("LoadPlaylist: final URL: %s", finalURL)
+
+					// If no Content-Disposition, try to extract filename from URL
+					if originalName == "" {
+						urlPath := finalURL
+						if idx := strings.LastIndex(urlPath, "/"); idx != -1 {
+							originalName = urlPath[idx+1:]
+							// Remove query parameters
+							if idx := strings.Index(originalName, "?"); idx != -1 {
+								originalName = originalName[:idx]
+							}
+							log.Printf("LoadPlaylist: extracted filename from URL: %s", originalName)
+						}
+					}
+					break
+				}
+			}
+		}
+
+		// Extract last frame as PNG for freeze frame
+		pngPath := filepath.Join(m.playlistDir, fmt.Sprintf("url_%d_last.png", urlNum))
+		ffmpegPath := os.Getenv("FFMPEG_PATH")
+		if ffmpegPath == "" {
+			ffmpegPath = "ffmpeg"
+		}
+
+		// Use ffmpeg to extract the last frame
+		// sseof -3 means seek to 3 seconds before end, then take 1 frame
+		extractCmd := exec.Command(ffmpegPath,
+			"-sseof", "-3",
+			"-i", filePath,
+			"-update", "1",
+			"-frames:v", "1",
+			"-y",
+			pngPath,
+		)
+		extractOutput, extractErr := extractCmd.CombinedOutput()
+		if extractErr != nil {
+			log.Printf("warn: failed to extract last frame for URL %d: %v", urlNum, extractErr)
+			log.Printf("warn: ffmpeg output: %s", string(extractOutput))
+			// Continue without PNG - we'll skip freeze frame for this item
+		} else {
+			log.Printf("LoadPlaylist: extracted last frame: %s", pngPath)
+		}
+
 		downloadedItems = append(downloadedItems, PlaylistItem{
-			Path: filePath,
-			Map:  item.Map,
+			Path:         filePath,
+			Map:          item.Map,
+			OriginalURL:  url,
+			OriginalName: originalName,
+			FinalURL:     finalURL,
 		})
 	}
 
@@ -1366,8 +1487,11 @@ func (m *goGstManager) StartPlaylist() error {
 		log.Printf("StartPlaylist: no prerun video found at %s, skipping prerun", prerunPath)
 	}
 
-	// For each playlist item, add: 30-sec prerun video → lesson video
+	// For each playlist item, add: 30-sec prerun video → lesson video → 5-sec freeze frame
 	sinkIndex := 0
+	freezeFrameDuration := fps * 5 // 5 seconds
+	audioFreezeDuration := 100 * 5 // 5 seconds worth of audio buffers
+
 	for i, item := range m.playlist.Items {
 		itemNum := i + 1
 
@@ -1384,6 +1508,18 @@ func (m *goGstManager) StartPlaylist() error {
 		pipeline += fmt.Sprintf(" u%d.video_0 ! queue ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! vcat.sink_%d", itemNum, fps, sinkIndex)
 		sinkIndex++
 		pipeline += fmt.Sprintf(" u%d.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_%d", itemNum, sinkIndex-1)
+
+		// Add 5-second freeze frame after each lesson (if PNG exists)
+		pngPath := filepath.Join(m.playlistDir, fmt.Sprintf("url_%d_last.png", itemNum))
+		if _, err := os.Stat(pngPath); err == nil {
+			log.Printf("StartPlaylist: adding 5-sec freeze frame for item %d: %s", itemNum, pngPath)
+			pipeline += fmt.Sprintf(" filesrc location=\"%s\" ! pngdec ! imagefreeze ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! identity eos-after=%d ! vcat.sink_%d", pngPath, fps, freezeFrameDuration, sinkIndex)
+			sinkIndex++
+			// Add silence for audio during freeze frame
+			pipeline += fmt.Sprintf(" audiotestsrc wave=silence ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! identity eos-after=%d ! acat.sink_%d", audioFreezeDuration, sinkIndex-1)
+		} else {
+			log.Printf("StartPlaylist: no freeze frame PNG for item %d, skipping", itemNum)
+		}
 	}
 
 	log.Printf("StartPlaylist: parsing concat pipeline...")
@@ -1401,6 +1537,13 @@ func (m *goGstManager) StartPlaylist() error {
 		logBusErrors("playlist-pipeline", pipe)
 		// Clean up the pipeline on failure to avoid stale JACK connections
 		_ = pipe.SetState(gst.StateNull)
+
+		// Check if it's a JACK connection error and suggest restart
+		if isJackConnectionError(pipe) {
+			log.Printf("StartPlaylist: JACK connection error detected - JACK may need restart")
+			log.Printf("StartPlaylist: Run: pkill -9 jackd && /opt/homebrew/bin/jackd -R -d coreaudio -C AUDINATE-DVS-UID -P AUDINATE-DVS-UID -r 48000 -p 256 -n 3 &")
+		}
+
 		return fmt.Errorf("set PLAYING: %w", err)
 	}
 
@@ -1467,4 +1610,260 @@ func (m *goGstManager) busWatchPlaylist() {
 // NextItem is not implemented for this pipeline style (entire playlist plays as one concat)
 func (m *goGstManager) NextItem() error {
 	return fmt.Errorf("NextItem not supported for concat-based playlists")
+}
+
+// GetState returns the current state of the controller
+func (m *goGstManager) GetState() StateResponse {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now().Format("2006-01-02 15:04:05")
+
+	// Determine current mode and running state
+	mode := "png"
+	running := false
+	file := ""
+	loop := false
+	var playlistInfo *PlaylistInfo
+
+	if m.pipeline != nil {
+		pipeName := m.pipeline.GetName()
+		running = true
+		switch pipeName {
+		case "lesson-only":
+			mode = "lesson"
+			file = m.currentLesson
+			loop = m.lessonLoop
+		case "playlist-pipeline":
+			mode = "playlist"
+			file = "concat-playlist"
+			if len(m.playlist.Items) > 0 {
+				playlistInfo = &PlaylistInfo{
+					ItemCount:    len(m.playlist.Items),
+					CurrentIndex: 0, // TODO: track current item
+					CurrentFile:  m.playlist.Items[0].Path,
+				}
+			}
+		default:
+			mode = "png"
+			file = os.Getenv("PNG_PATH")
+		}
+	}
+
+	// Build playout state
+	playout := PlayoutState{
+		Running:        running,
+		Mode:           mode,
+		Label:          filepath.Base(file),
+		File:           file,
+		PID:            os.Getpid(),
+		Loop:           loop,
+		Overlay:        os.Getenv("PNG_PATH"),
+		OverlayEnabled: false,
+		Playlist:       playlistInfo,
+		HeartbeatISO:   now,
+	}
+
+	// Get JACK state
+	jack := m.getJackState()
+
+	// Build playlist prepared state
+	var playlistPrepared *PlaylistPreparedState
+	if len(m.playlist.Items) > 0 {
+		playlistPrepared = m.getPlaylistPreparedState()
+	}
+
+	return StateResponse{
+		Playout:              playout,
+		Jack:                 jack,
+		PlaylistLastPrepared: playlistPrepared,
+	}
+}
+
+// getJackState returns the current JACK server state
+func (m *goGstManager) getJackState() JackState {
+	jack := JackState{
+		Running:  false,
+		PID:      0,
+		Rate:     48000,
+		Buffer:   256,
+		NPeriods: 3,
+		Source:   "default",
+	}
+
+	// Try to read JACK state from file
+	stateFile := "/opt/backup/state/jack.json"
+	if data, err := os.ReadFile(stateFile); err == nil {
+		var jackData map[string]interface{}
+		if err := json.Unmarshal(data, &jackData); err == nil {
+			if running, ok := jackData["running"].(bool); ok {
+				jack.Running = running
+			}
+			if pid, ok := jackData["pid"].(float64); ok {
+				jack.PID = int(pid)
+			}
+			if rate, ok := jackData["rate"].(float64); ok {
+				jack.Rate = int(rate)
+			}
+			if buffer, ok := jackData["buffer"].(float64); ok {
+				jack.Buffer = int(buffer)
+			}
+			if nperiods, ok := jackData["nperiods"].(float64); ok {
+				jack.NPeriods = int(nperiods)
+			}
+			jack.Source = "jack.json"
+			return jack
+		}
+	}
+
+	// Fallback: check if jackd process is running
+	cmd := exec.Command("pgrep", "-x", "jackd")
+	if output, err := cmd.Output(); err == nil && len(output) > 0 {
+		jack.Running = true
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(output))); err == nil {
+			jack.PID = pid
+		}
+		jack.Source = "pgrep"
+	}
+
+	return jack
+}
+
+// getPlaylistPreparedState returns the prepared playlist state
+func (m *goGstManager) getPlaylistPreparedState() *PlaylistPreparedState {
+	if len(m.playlist.Items) == 0 {
+		return nil
+	}
+
+	preparedFiles := 0
+	preparedPNGs := 0
+	items := []PlaylistPreparedItem{}
+
+	for i, item := range m.playlist.Items {
+		fileExists := false
+		pngExists := false
+		var fileMtime time.Time
+
+		// Check if file exists
+		if stat, err := os.Stat(item.Path); err == nil {
+			fileExists = true
+			fileMtime = stat.ModTime()
+			preparedFiles++
+		}
+
+		// Check if PNG exists
+		pngPath := strings.TrimSuffix(item.Path, filepath.Ext(item.Path)) + "_last.png"
+		if _, err := os.Stat(pngPath); err == nil {
+			pngExists = true
+			preparedPNGs++
+		}
+
+		// Get duration using ffprobe if available
+		duration := ""
+		if fileExists {
+			duration = m.getVideoDuration(item.Path)
+		}
+
+		prepItem := PlaylistPreparedItem{
+			Index:        i + 1,
+			URL:          item.OriginalURL,
+			File:         item.Path,
+			PNG:          pngPath,
+			OriginalName: item.OriginalName,
+			FinalURL:     item.FinalURL,
+			FileExists:   fileExists,
+			PNGExists:    pngExists,
+			DurationHMS:  duration,
+		}
+
+		if fileExists {
+			prepItem.FileMtimeISO = fileMtime.Format("2006-01-02 15:04:05")
+		}
+
+		items = append(items, prepItem)
+	}
+
+	// Try to get preparation time from playlist.json
+	preparedAt := ""
+	metaPath := m.playlistMetadataPath()
+	if stat, err := os.Stat(metaPath); err == nil {
+		preparedAt = stat.ModTime().Format("2006-01-02 15:04:05")
+	}
+
+	return &PlaylistPreparedState{
+		Preparing:     false,
+		Label:         "playlist",
+		URLCount:      len(m.playlist.Items),
+		PlaylistDir:   m.playlistDir,
+		FileCount:     len(m.playlist.Items),
+		PreparedFiles: preparedFiles,
+		PreparedPNGs:  preparedPNGs,
+		PreparedAtISO: preparedAt,
+		Items:         items,
+		UpdatedAtISO:  preparedAt,
+	}
+}
+
+// getVideoDuration returns the duration of a video file in HH:MM:SS format
+func (m *goGstManager) getVideoDuration(filePath string) string {
+	ffprobePath := os.Getenv("FFPROBE_PATH")
+	if ffprobePath == "" {
+		ffprobePath = "ffprobe"
+	}
+
+	cmd := exec.Command(ffprobePath,
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		filePath)
+
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	durationSec, err := strconv.ParseFloat(strings.TrimSpace(string(output)), 64)
+	if err != nil {
+		return ""
+	}
+
+	hours := int(durationSec) / 3600
+	minutes := (int(durationSec) % 3600) / 60
+	seconds := int(durationSec) % 60
+
+	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+}
+
+// isJackConnectionError checks if the pipeline failed due to JACK connection issues
+func isJackConnectionError(pipe *gst.Pipeline) bool {
+	if pipe == nil {
+		return false
+	}
+
+	bus := pipe.GetBus()
+	if bus == nil {
+		return false
+	}
+
+	// Check for error messages related to JACK
+	msg := bus.TimedPop(100 * time.Millisecond)
+	if msg == nil {
+		return false
+	}
+
+	if msg.Type() == gst.MessageError {
+		err := msg.ParseError()
+		if err != nil {
+			errStr := err.Error()
+			debugStr := err.DebugString()
+			// Look for JACK-specific error messages
+			if strings.Contains(errStr, "Could not open resource for writing") ||
+				strings.Contains(errStr, "Jack client open error") ||
+				strings.Contains(debugStr, "jackaudiosink") {
+				return true
+			}
+		}
+	}
+
+	return false
 }

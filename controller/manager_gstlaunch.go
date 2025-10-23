@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // gstLaunchManager: temporary implementation using gst-launch
@@ -116,3 +117,17 @@ func (m *gstLaunchManager) LoadPlaylist(p Playlist) error { playlist = p; return
 func (m *gstLaunchManager) StartPlaylist() error          { return nil }
 func (m *gstLaunchManager) NextItem() error               { return nil }
 func (m *gstLaunchManager) Stop() error                   { return m.stopCurrent() }
+func (m *gstLaunchManager) GetState() StateResponse {
+	return StateResponse{
+		Playout: PlayoutState{
+			Running:      false,
+			Mode:         "unknown",
+			PID:          os.Getpid(),
+			HeartbeatISO: time.Now().Format("2006-01-02 15:04:05"),
+		},
+		Jack: JackState{
+			Running: false,
+			Source:  "unavailable",
+		},
+	}
+}

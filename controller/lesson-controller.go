@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -38,8 +42,11 @@ type Playlist struct {
 }
 
 type PlaylistItem struct {
-	Path string         `json:"path"`
-	Map  map[string]int `json:"map"`
+	Path         string         `json:"path"`
+	Map          map[string]int `json:"map"`
+	OriginalURL  string         `json:"original_url,omitempty"`
+	OriginalName string         `json:"original_name,omitempty"`
+	FinalURL     string         `json:"final_url,omitempty"`
 }
 
 var (
@@ -270,6 +277,13 @@ func handlePlaylistNext(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
+func handleState(w http.ResponseWriter, r *http.Request) {
+	state := manager.GetState()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(state)
+}
+
 func main() {
 	// Optional: read map from env or default sample
 	mapPath := os.Getenv("AUDIO_MAP_PATH")
@@ -299,6 +313,10 @@ func main() {
 		log.Printf("pipeline ready: defaulting to PNG; use /source endpoints to switch")
 	}
 
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+
 	r := mux.NewRouter()
 	r.HandleFunc("/source/png", handleSourcePNG).Methods(http.MethodPost)
 	r.HandleFunc("/source/lesson", handleSourceLesson).Methods(http.MethodPost)
@@ -306,12 +324,46 @@ func main() {
 	r.HandleFunc("/playlist/load", handlePlaylistLoad).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/start", handlePlaylistStart).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/next", handlePlaylistNext).Methods(http.MethodPost)
+	r.HandleFunc("/v1/state", handleState).Methods(http.MethodGet)
 
-	addr := ":8788"
-	log.Printf("lesson-controller listening on %s", addr)
-	if err := http.ListenAndServe(addr, r); err != nil {
-		panic(fmt.Errorf("server error: %w", err))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8788"
 	}
+	addr := ":" + port
+
+	// Create HTTP server with graceful shutdown support
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: r,
+	}
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("lesson-controller listening on %s", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	sig := <-sigChan
+	log.Printf("received signal: %v, shutting down gracefully...", sig)
+
+	// Clean up pipeline and JACK connections
+	log.Printf("stopping pipeline and cleaning up JACK connections...")
+	if err := manager.Stop(); err != nil {
+		log.Printf("error stopping manager: %v", err)
+	}
+
+	// Gracefully shutdown HTTP server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+	}
+
+	log.Printf("shutdown complete")
 }
 
 // minimal shell escape for file paths used in gst location=
