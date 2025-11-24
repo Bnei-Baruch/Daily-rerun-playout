@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -38,8 +42,11 @@ type Playlist struct {
 }
 
 type PlaylistItem struct {
-	Path string         `json:"path"`
-	Map  map[string]int `json:"map"`
+	Path         string         `json:"path"`
+	Map          map[string]int `json:"map"`
+	OriginalURL  string         `json:"original_url,omitempty"`
+	OriginalName string         `json:"original_name,omitempty"`
+	FinalURL     string         `json:"final_url,omitempty"`
 }
 
 var (
@@ -157,6 +164,7 @@ func (m *Manager) NextItem() error {
 }
 
 var manager PipelineManager
+var captureManager *CaptureManager
 
 func loadAudioMap(path string) error {
 	data, err := os.ReadFile(path)
@@ -201,6 +209,96 @@ func handleSourceLesson(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("OK"))
+}
+
+func handleSourceHLS(w http.ResponseWriter, r *http.Request) {
+	// Check if playlist is in URL path
+	vars := mux.Vars(r)
+	playlistFromPath := vars["playlist"]
+
+	var req struct {
+		Playlist string `json:"playlist"` // Playlist ID (e.g. "01")
+		URL      string `json:"url"`      // Or direct HLS URL
+	}
+
+	// Try to decode JSON body (optional if playlist is in path)
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	// Prefer playlist from URL path, then from JSON body
+	playlist := playlistFromPath
+	if playlist == "" {
+		playlist = req.Playlist
+	}
+
+	var hlsURL, gstCommand string
+
+	// If playlist ID provided, fetch from API
+	if playlist != "" {
+		url := fmt.Sprintf("http://10.66.1.105:8081/api/playlist/list")
+
+		// Try Go HTTP client first
+		resp, err := http.Get(url)
+		var playlists map[string]struct {
+			Playlist []struct {
+				HLSPath string `json:"hls_path"`
+				CmdExec string `json:"cmd_exec"`
+			} `json:"playlist"`
+		}
+
+		if err != nil {
+			// Fallback to curl if Go HTTP client fails
+			log.Printf("HLS: Go HTTP client failed (%v), trying curl fallback", err)
+			cmd := exec.Command("curl", "-s", url)
+			output, curlErr := cmd.Output()
+			if curlErr != nil {
+				http.Error(w, fmt.Sprintf("failed to fetch playlist (curl): %v", curlErr), http.StatusInternalServerError)
+				return
+			}
+			if err := json.Unmarshal(output, &playlists); err != nil {
+				http.Error(w, fmt.Sprintf("failed to parse playlist (curl): %v", err), http.StatusInternalServerError)
+				return
+			}
+			log.Printf("HLS: curl fallback succeeded")
+		} else {
+			defer resp.Body.Close()
+			if err := json.NewDecoder(resp.Body).Decode(&playlists); err != nil {
+				http.Error(w, fmt.Sprintf("failed to parse playlist: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		playlistData, ok := playlists[playlist]
+		if !ok || len(playlistData.Playlist) == 0 {
+			http.Error(w, fmt.Sprintf("playlist %s not found", playlist), http.StatusNotFound)
+			return
+		}
+
+		hlsURL = playlistData.Playlist[0].HLSPath
+		gstCommand = playlistData.Playlist[0].CmdExec
+		log.Printf("HLS: Using playlist %s, URL=%s", playlist, hlsURL)
+	} else if req.URL != "" {
+		hlsURL = req.URL
+		log.Printf("HLS: Using direct URL=%s", hlsURL)
+	} else {
+		http.Error(w, "either playlist or url is required", http.StatusBadRequest)
+		return
+	}
+
+	// Type assertion to access HLS method
+	if hlsManager, ok := manager.(interface{ SwitchToHLS(string, string) error }); ok {
+		if err := hlsManager.SwitchToHLS(hlsURL, gstCommand); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		http.Error(w, "HLS not supported by this manager", http.StatusNotImplemented)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("OK"))
 }
@@ -270,7 +368,72 @@ func handlePlaylistNext(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
+func handleState(w http.ResponseWriter, r *http.Request) {
+	state := manager.GetState()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(state)
+}
+
+func handleCaptureStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Label    string `json:"label"`
+		Duration int    `json:"duration"`
+		Mode     string `json:"mode"` // "sdi" for embedded stereo
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Allow empty body
+		req.Label = "capture"
+	}
+	if req.Label == "" {
+		req.Label = "capture"
+	}
+
+	// Start capture using the capture manager
+	if err := captureManager.Start(req.Label, req.Duration, req.Mode); err != nil {
+		http.Error(w, fmt.Sprintf("failed to start capture: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("capture: started label=%s duration=%d mode=%s", req.Label, req.Duration, req.Mode)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":      true,
+		"label":   req.Label,
+		"message": "capture started",
+	})
+}
+
+func handleCaptureStop(w http.ResponseWriter, r *http.Request) {
+	// Stop capture using the capture manager
+	if err := captureManager.Stop(); err != nil {
+		http.Error(w, fmt.Sprintf("failed to stop capture: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("capture: stopped")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":      true,
+		"message": "capture stopped",
+	})
+}
+
+func handleCaptureStatus(w http.ResponseWriter, r *http.Request) {
+	// Get capture status from the capture manager
+	state := captureManager.GetState()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(state)
+}
+
 func main() {
+	log.Printf("lesson-controller starting (PID=%d)", os.Getpid())
 	// Optional: read map from env or default sample
 	mapPath := os.Getenv("AUDIO_MAP_PATH")
 	if mapPath == "" {
@@ -286,6 +449,11 @@ func main() {
 	if err := loadAudioMap(mapPath); err != nil {
 		log.Printf("warning: could not load audio map %s: %v", mapPath, err)
 	}
+
+	// Initialize capture manager
+	captureManager = NewCaptureManager()
+	log.Printf("capture manager initialized")
+
 	// Manager
 	// Manager selection: try go-gst when GO_GST=1, else fallback to gst-launch
 	mgr, err := tryNewGoGst(audioMap)
@@ -299,19 +467,62 @@ func main() {
 		log.Printf("pipeline ready: defaulting to PNG; use /source endpoints to switch")
 	}
 
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+
 	r := mux.NewRouter()
 	r.HandleFunc("/source/png", handleSourcePNG).Methods(http.MethodPost)
 	r.HandleFunc("/source/lesson", handleSourceLesson).Methods(http.MethodPost)
+	r.HandleFunc("/source/hls", handleSourceHLS).Methods(http.MethodPost)
+	r.HandleFunc("/source/hls/{playlist}", handleSourceHLS).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/prepare", handlePlaylistPrepare).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/load", handlePlaylistLoad).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/start", handlePlaylistStart).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/next", handlePlaylistNext).Methods(http.MethodPost)
+	r.HandleFunc("/v1/state", handleState).Methods(http.MethodGet)
+	r.HandleFunc("/v1/capture/start", handleCaptureStart).Methods(http.MethodPost)
+	r.HandleFunc("/v1/capture/stop", handleCaptureStop).Methods(http.MethodPost)
+	r.HandleFunc("/v1/capture", handleCaptureStatus).Methods(http.MethodGet)
 
-	addr := ":8788"
-	log.Printf("lesson-controller listening on %s", addr)
-	if err := http.ListenAndServe(addr, r); err != nil {
-		panic(fmt.Errorf("server error: %w", err))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8788"
 	}
+	addr := ":" + port
+
+	// Create HTTP server with graceful shutdown support
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: r,
+	}
+
+	// Start server in a goroutine
+	go func() {
+		log.Printf("lesson-controller listening on %s", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	sig := <-sigChan
+	log.Printf("received signal: %v, shutting down gracefully...", sig)
+
+	// Clean up pipeline and JACK connections
+	log.Printf("stopping pipeline and cleaning up JACK connections...")
+	if err := manager.Stop(); err != nil {
+		log.Printf("error stopping manager: %v", err)
+	}
+
+	// Gracefully shutdown HTTP server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+	}
+
+	log.Printf("shutdown complete")
 }
 
 // minimal shell escape for file paths used in gst location=
