@@ -20,7 +20,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -150,7 +152,7 @@ func (m *goGstManager) SwitchToHLS(url string, gstCommand string) error {
 
 	if url == "" {
 		return fmt.Errorf("HLS URL is required")
-	}
+}
 	log.Printf("SwitchToHLS: requested url=%s", url)
 
 	// Fully tear down any existing pipeline
@@ -180,8 +182,163 @@ func (m *goGstManager) SwitchToHLS(url string, gstCommand string) error {
 	return nil
 }
 
+var (
+	playlistPrepState     PlaylistPreparedState
+	playlistPrepStateMu   sync.Mutex
+	playlistPrerollPath   string
+	playlistCurrentIndex  int
+	playlistFiles         []string
+)
+
+func init() {
+	playlistPrerollPath = os.Getenv("PREROLL")
+	if playlistPrerollPath == "" {
+		playlistPrerollPath = "/opt/backup/preroll.mp4"
+	}
+}
+
+func (m *goGstManager) PreparePlaylist(urls []string, label string) error {
+	// Start async preparation
+	go m.preparePlaylistAsync(urls, label)
+	return nil
+}
+
+func (m *goGstManager) preparePlaylistAsync(urls []string, label string) {
+	playlistDir := os.Getenv("PLAYLIST_DIR")
+	if playlistDir == "" {
+		playlistDir = "/opt/backup/playlist"
+	}
+
+	playlistPrepStateMu.Lock()
+	playlistPrepState = PlaylistPreparedState{
+		Preparing:     true,
+		Label:         label,
+		URLs:          urls,
+		URLCount:      len(urls),
+		PlaylistDir:   playlistDir,
+		StartedAtISO:  time.Now().Format("2006-01-02 15:04:05"),
+		UpdatedAtISO:  time.Now().Format("2006-01-02 15:04:05"),
+	}
+	playlistPrepStateMu.Unlock()
+
+	log.Printf("playlist prepare: starting label=%s urls=%d", label, len(urls))
+
+	// Clean up previous files
+	os.RemoveAll(playlistDir)
+	os.MkdirAll(playlistDir, 0755)
+
+	// Find ffmpeg and ffprobe
+	ffmpegBin := findBinary("ffmpeg", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg")
+	ffprobeBin := findBinary("ffprobe", "/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe")
+
+	var items []PlaylistPreparedItem
+	successCount := 0
+	pngCount := 0
+
+	for i, url := range urls {
+		idx := i + 1
+		filename := fmt.Sprintf("url_%d.mp4", idx)
+		filePath := fmt.Sprintf("%s/%s", playlistDir, filename)
+		pngPath := fmt.Sprintf("%s/last_frame-%d.png", playlistDir, idx)
+
+		log.Printf("playlist prepare: downloading %d/%d: %s", idx, len(urls), url)
+
+		// Download file
+		cmd := exec.Command("curl", "-L", "-o", filePath, url)
+		if err := cmd.Run(); err != nil {
+			log.Printf("playlist prepare: download failed for %s: %v", url, err)
+			continue
+		}
+
+		successCount++
+		item := PlaylistPreparedItem{
+			Index:      idx,
+			URL:        url,
+			File:       filePath,
+			PNG:        pngPath,
+			FileExists: true,
+		}
+
+		// Get final URL
+		finalURLCmd := exec.Command("curl", "-Ls", "-o", "/dev/null", "-w", "%{url_effective}", url)
+		if finalURLBytes, err := finalURLCmd.Output(); err == nil {
+			item.FinalURL = strings.TrimSpace(string(finalURLBytes))
+			if item.FinalURL != "" {
+				urlParts := strings.Split(item.FinalURL, "?")
+				item.OriginalName = filepath.Base(urlParts[0])
+			}
+		}
+
+		// Extract last frame with ffmpeg
+		if ffmpegBin != "" {
+			log.Printf("playlist prepare: extracting last frame for %d", idx)
+			ffmpegCmd := exec.Command(ffmpegBin, "-y", "-sseof", "-1", "-i", filePath, "-frames:v", "1", "-qscale:v", "2", pngPath)
+			if err := ffmpegCmd.Run(); err == nil {
+				item.PNGExists = true
+				pngCount++
+				log.Printf("playlist prepare: last frame extracted: %s", pngPath)
+			} else {
+				log.Printf("playlist prepare: ffmpeg last-frame failed for %s: %v", filePath, err)
+			}
+		}
+
+		// Get duration with ffprobe
+		if ffprobeBin != "" {
+			probeCmd := exec.Command(ffprobeBin, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath)
+			if durBytes, err := probeCmd.Output(); err == nil {
+				durStr := strings.TrimSpace(string(durBytes))
+				if dur, err := strconv.ParseFloat(durStr, 64); err == nil {
+					sec := int(dur)
+					h := sec / 3600
+					m := (sec % 3600) / 60
+					s := sec % 60
+					item.DurationHMS = fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+				}
+			}
+		}
+
+		// Get file mtime
+		if stat, err := os.Stat(filePath); err == nil {
+			item.FileMtimeISO = stat.ModTime().Format("2006-01-02 15:04:05")
+		}
+
+		items = append(items, item)
+
+		// Update state
+		playlistPrepStateMu.Lock()
+		playlistPrepState.PreparedFiles = successCount
+		playlistPrepState.PreparedPNGs = pngCount
+		playlistPrepState.Items = items
+		playlistPrepState.UpdatedAtISO = time.Now().Format("2006-01-02 15:04:05")
+		playlistPrepStateMu.Unlock()
+	}
+
+	// Final state update
+	playlistPrepStateMu.Lock()
+	playlistPrepState.Preparing = false
+	playlistPrepState.FileCount = successCount
+	playlistPrepState.PreparedAtISO = time.Now().Format("2006-01-02 15:04:05")
+	playlistPrepStateMu.Unlock()
+
+	log.Printf("playlist prepare: completed label=%s files=%d pngs=%d", label, successCount, pngCount)
+}
+
+func findBinary(name string, paths ...string) string {
+	if path, err := exec.LookPath(name); err == nil {
+		return path
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
 func (m *goGstManager) LoadPlaylist(Playlist) error { return nil }
-func (m *goGstManager) StartPlaylist() error        { return nil }
+func (m *goGstManager) StartPlaylist() error        { 
+	return m.startPlaylistPlayback()
+}
 func (m *goGstManager) NextItem() error             { return nil }
 
 func (m *goGstManager) Stop() error {
@@ -209,6 +366,15 @@ func (m *goGstManager) GetState() StateResponse {
 	rerunPNG := os.Getenv("RERUN_PNG")
 	overlayEnabled := rerunPNG != "" && mode == "lesson" // Only show overlay for lessons
 
+	// Get playlist state
+	playlistPrepStateMu.Lock()
+	var prepState *PlaylistPreparedState
+	if playlistPrepState.URLCount > 0 {
+		prepStateCopy := playlistPrepState
+		prepState = &prepStateCopy
+	}
+	playlistPrepStateMu.Unlock()
+
 	return StateResponse{
 		Playout: PlayoutState{
 			Running:        running,
@@ -231,6 +397,7 @@ func (m *goGstManager) GetState() StateResponse {
 		Capture: CaptureState{
 			Running: false, // Capture is handled separately
 		},
+		PlaylistLastPrepared: prepState,
 	}
 }
 
@@ -816,8 +983,8 @@ func buildLessonExplicitBin(path string) (*gst.Bin, *gst.Pad, error) {
 			return nil, nil, fmt.Errorf("link explicit lesson chain with overlay: %w", err)
 		}
 	} else {
-		if err := gst.ElementLinkMany(vq, h264p, dec, vc, vs, vr, caps); err != nil {
-			return nil, nil, fmt.Errorf("link explicit lesson chain: %w", err)
+	if err := gst.ElementLinkMany(vq, h264p, dec, vc, vs, vr, caps); err != nil {
+		return nil, nil, fmt.Errorf("link explicit lesson chain: %w", err)
 		}
 	}
 	if p := caps.GetStaticPad("src"); p != nil {
@@ -1146,7 +1313,7 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 
 				switch msg.Type() {
 				case gst.MessageEOS:
-					m.mu.Lock()
+	m.mu.Lock()
 					shouldLoop := m.lessonLoop
 					loopPath := m.currentLesson
 					m.mu.Unlock()
@@ -1154,7 +1321,7 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 					log.Printf("lesson EOS received, loop=%t, path=%s", shouldLoop, loopPath)
 					if shouldLoop && loopPath != "" {
 						log.Printf("restarting lesson in loop mode")
-						time.Sleep(100 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 						// Call SwitchToLesson without holding any locks
 						if err := m.SwitchToLesson(loopPath, true, nil); err != nil {
 							log.Printf("lesson loop restart failed: %v", err)
@@ -1288,7 +1455,7 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 	}
 
 	parsed, err := gst.NewBinFromString(desc, false)
-	if err != nil {
+			if err != nil {
 		return fmt.Errorf("parse HLS bin: %w", err)
 	}
 	if err := pipe.Add(parsed.Element); err != nil {
@@ -1328,8 +1495,8 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 					log.Printf("HLS bus watch exiting: pipeline changed")
 					return
 				}
-				continue
-			}
+			continue
+		}
 
 			switch msg.Type() {
 			case gst.MessageEOS:
@@ -1403,4 +1570,218 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// startPlaylistPlayback plays all prepared files with preroll and PNG transitions
+func (m *goGstManager) startPlaylistPlayback() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	playlistDir := os.Getenv("PLAYLIST_DIR")
+	if playlistDir == "" {
+		playlistDir = "/opt/backup/playlist"
+	}
+
+	// Find all MP4 files in playlist directory
+	files, err := filepath.Glob(filepath.Join(playlistDir, "url_*.mp4"))
+	if err != nil || len(files) == 0 {
+		return fmt.Errorf("no playlist files found in %s", playlistDir)
+	}
+
+	// Sort files by name (url_1.mp4, url_2.mp4, etc.)
+	sort.Strings(files)
+
+	log.Printf("playlist playback: found %d files", len(files))
+
+	// Tear down any existing pipeline
+	if m.pipeline != nil {
+		_ = m.pipeline.SetState(gst.StateNull)
+	}
+	m.pipeline = nil
+
+	m.currentMode = "playlist"
+	playlistFiles = files
+	playlistCurrentIndex = 0
+
+	if err := m.buildPlaylistPipeline(files); err != nil {
+		return fmt.Errorf("build playlist pipeline: %w", err)
+	}
+
+	log.Printf("playlist playback: started with %d files", len(files))
+	return nil
+}
+
+// buildPlaylistPipeline creates a concat-based pipeline for playlist playback
+// Structure: [preroll -> file -> png] repeated for each file
+func (m *goGstManager) buildPlaylistPipeline(files []string) error {
+	gst.Init(nil)
+
+	pipe, err := gst.NewPipeline("playlist-pipeline")
+	if err != nil {
+		return err
+	}
+
+	modeID := decklinkModeEnum(decklinkModeString())
+	sinkIdent := decklinkSinkIdentifier()
+	fps := 25
+	pngDurationSec := 5
+	pngFrames := fps * pngDurationSec
+	pngAudioBuf := 100 * pngDurationSec
+
+	playlistDir := os.Getenv("PLAYLIST_DIR")
+	if playlistDir == "" {
+		playlistDir = "/opt/backup/playlist"
+	}
+
+	// Start building the pipeline description
+	// Video concat -> interlace -> decklink
+	// Audio concat -> tee -> 36 JACK sinks
+	desc := fmt.Sprintf(`concat name=vcat ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! interlace field-pattern=2:2 top-field-first=true ! decklinkvideosink mode=%d %s sync=true`, fps, modeID, sinkIdent)
+	
+	// Audio tee to all JACK ports
+	desc += ` concat name=acat ! tee name=audio_tee`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-heb-L port-pattern=20 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-heb-R port-pattern=21 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-en port-pattern=29 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-ru port-pattern=22 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-es port-pattern=30 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-fr port-pattern=1 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-it port-pattern=2 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-de port-pattern=3 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-tr port-pattern=4 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-pt port-pattern=5 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-bg port-pattern=6 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-ka port-pattern=7 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-ro port-pattern=8 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-hu port-pattern=9 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-sv port-pattern=10 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-lt port-pattern=11 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-hr port-pattern=12 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-ja port-pattern=13 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-sl port-pattern=14 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-pl port-pattern=15 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-no port-pattern=16 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-lv port-pattern=17 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-uk port-pattern=18 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-nl port-pattern=19 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-zh port-pattern=23 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-am port-pattern=24 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-hi port-pattern=25 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-fa port-pattern=26 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-ar port-pattern=27 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-id port-pattern=28 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-hy port-pattern=32 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-da port-pattern=33 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-et port-pattern=34 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-el port-pattern=35 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-tl port-pattern=36 sync=false`
+	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-az port-pattern=37 sync=false`
+
+	sinkIndex := 0
+
+	// For each file: add preroll (if exists), then file, then PNG
+	for i, file := range files {
+		itemNum := i + 1
+		log.Printf("playlist: adding segments for item %d: %s", itemNum, file)
+
+		// 1. Preroll video (if exists)
+		if playlistPrerollPath != "" {
+			if _, err := os.Stat(playlistPrerollPath); err == nil {
+				desc += fmt.Sprintf(` filesrc location="%s" ! qtdemux name=p%d`, playlistPrerollPath, itemNum)
+				desc += fmt.Sprintf(` p%d.video_0 ! queue ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! vcat.sink_%d`, itemNum, fps, sinkIndex)
+				desc += fmt.Sprintf(` p%d.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_%d`, itemNum, sinkIndex)
+			sinkIndex++
+			}
+		}
+
+		// 2. Main file
+		desc += fmt.Sprintf(` filesrc location="%s" ! qtdemux name=u%d`, file, itemNum)
+		desc += fmt.Sprintf(` u%d.video_0 ! queue ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! vcat.sink_%d`, itemNum, fps, sinkIndex)
+		desc += fmt.Sprintf(` u%d.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_%d`, itemNum, sinkIndex)
+		sinkIndex++
+
+		// 3. PNG last frame (if exists)
+		pngPath := fmt.Sprintf("%s/last_frame-%d.png", playlistDir, itemNum)
+		if _, err := os.Stat(pngPath); err == nil {
+			desc += fmt.Sprintf(` filesrc location="%s" ! decodebin ! queue ! imagefreeze ! videoscale ! videoconvert ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! identity eos-after=%d ! vcat.sink_%d`, pngPath, fps, pngFrames, sinkIndex)
+			desc += fmt.Sprintf(` audiotestsrc wave=silence samplesperbuffer=480 num-buffers=%d ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_%d`, pngAudioBuf, sinkIndex)
+			sinkIndex++
+		} else {
+			log.Printf("playlist: warning - PNG not found for item %d: %s", itemNum, pngPath)
+		}
+	}
+
+	log.Printf("playlist: pipeline description length: %d chars", len(desc))
+
+	parsed, err := gst.NewBinFromString(desc, false)
+	if err != nil {
+		return fmt.Errorf("parse playlist bin: %w", err)
+	}
+	if err := pipe.Add(parsed.Element); err != nil {
+		return fmt.Errorf("add playlist bin: %w", err)
+	}
+
+	if err := pipe.SetState(gst.StatePlaying); err != nil {
+		logBusErrors("playlist pipeline", pipe)
+		return fmt.Errorf("set playlist pipeline PLAYING: %w", err)
+	}
+
+	m.pipeline = pipe
+
+	// Add bus message handler for EOS
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("playlist bus watch recovered from panic: %v", r)
+			}
+		}()
+
+		bus := pipe.GetBus()
+		if bus == nil {
+			log.Printf("playlist: no bus available")
+			return
+		}
+
+		for {
+			msg := bus.TimedPop(100 * time.Millisecond)
+			if msg == nil {
+				// Check if pipeline still exists
+		m.mu.Lock()
+				stillActive := m.pipeline == pipe && m.currentMode == "playlist"
+		m.mu.Unlock()
+
+				if !stillActive {
+					log.Printf("playlist bus watch exiting: pipeline changed")
+			return
+		}
+			continue
+		}
+
+		switch msg.Type() {
+		case gst.MessageEOS:
+				log.Printf("playlist finished (EOS), switching back to PNG")
+				go func() {
+					if err := m.SwitchToPNG(); err != nil {
+						log.Printf("playlist EOS: failed to switch to PNG: %v", err)
+			} else {
+						log.Printf("playlist EOS: switched to PNG successfully")
+				}
+				}()
+			return
+
+		case gst.MessageError:
+			err := msg.ParseError()
+				log.Printf("playlist pipeline error: %s", err.Error())
+				go func() {
+					if err := m.SwitchToPNG(); err != nil {
+						log.Printf("playlist error: failed to switch to PNG: %v", err)
+					}
+				}()
+			return
+			}
+		}
+	}()
+
+	log.Printf("playlist pipeline started")
+	return nil
 }

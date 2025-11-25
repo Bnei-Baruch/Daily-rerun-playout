@@ -305,7 +305,8 @@ func handleSourceHLS(w http.ResponseWriter, r *http.Request) {
 
 func handlePlaylistPrepare(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		URLs []string `json:"urls"`
+		URLs  []string `json:"urls"`
+		Label string   `json:"label"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -315,14 +316,27 @@ func handlePlaylistPrepare(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "urls array is required", http.StatusBadRequest)
 		return
 	}
-	if err := manager.LoadPlaylist(Playlist{Items: urlsToPlaylistItems(req.URLs)}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if req.Label == "" {
+		req.Label = "playlist-prepare"
+	}
+
+	// Type assertion to access PreparePlaylist method
+	if prepManager, ok := manager.(interface{ PreparePlaylist(urls []string, label string) error }); ok {
+		if err := prepManager.PreparePlaylist(req.URLs, req.Label); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		http.Error(w, "playlist prepare not supported by this manager", http.StatusNotImplemented)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+
+	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status": "prepared",
-		"count":  len(req.URLs),
+		"status":  "preparing",
+		"count":   len(req.URLs),
+		"label":   req.Label,
+		"message": "playlist preparation started in background",
 	})
 }
 
