@@ -114,12 +114,12 @@ Returns current controller state including playlist preparation status.
 
 ```bash
 # 1. Prepare playlist
-curl -X POST http://localhost:8788/playlist/prepare \
+curl -X POST http://10.66.1.144:8788/playlist/prepare \
   -H "Content-Type: application/json" \
   -d '{
     "urls": [
-      "https://src.bbdomain.org/video1.mp4",
-      "https://src.bbdomain.org/video2.mp4"
+      "https://cdn.kabbalahmedia.info/WWR2RnD5",
+      "https://cdn.kab.info/get/T9rp0I8W.mp4?audio=heb&video=hd"
     ],
     "label": "daily-lessons"
   }'

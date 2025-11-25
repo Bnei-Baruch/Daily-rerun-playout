@@ -321,7 +321,9 @@ func handlePlaylistPrepare(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Type assertion to access PreparePlaylist method
-	if prepManager, ok := manager.(interface{ PreparePlaylist(urls []string, label string) error }); ok {
+	if prepManager, ok := manager.(interface {
+		PreparePlaylist(urls []string, label string) error
+	}); ok {
 		if err := prepManager.PreparePlaylist(req.URLs, req.Label); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

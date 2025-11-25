@@ -54,10 +54,11 @@ type goGstManager struct {
 	lessonSinkPad *gst.Pad
 	lessonDecode  *gst.Element
 
-	currentMode   string // "png" or "lesson"
-	currentLesson string
-	lessonLoop    bool
-	trackMap      map[string]int
+	currentMode      string // "png" or "lesson" or "hls" or "playlist"
+	currentLesson    string
+	currentStarted   time.Time
+	lessonLoop       bool
+	trackMap         map[string]int
 }
 
 func NewGoGstManager(m AudioMap) *goGstManager {
@@ -102,6 +103,7 @@ func (m *goGstManager) SwitchToLesson(path string, loop bool, trackMap map[strin
 	// Set loop parameters BEFORE building pipeline so bus watch can access them
 	m.currentMode = "lesson"
 	m.currentLesson = path
+	m.currentStarted = time.Now()
 	m.lessonLoop = loop
 	m.trackMap = trackMap
 
@@ -136,6 +138,7 @@ func (m *goGstManager) SwitchToPNG() error {
 
 	m.currentMode = "png"
 	m.currentLesson = ""
+	m.currentStarted = time.Now()
 	m.lessonLoop = false
 
 	if err := m.buildPNGOnlyPipeline(); err != nil {
@@ -152,7 +155,7 @@ func (m *goGstManager) SwitchToHLS(url string, gstCommand string) error {
 
 	if url == "" {
 		return fmt.Errorf("HLS URL is required")
-}
+	}
 	log.Printf("SwitchToHLS: requested url=%s", url)
 
 	// Fully tear down any existing pipeline
@@ -172,6 +175,7 @@ func (m *goGstManager) SwitchToHLS(url string, gstCommand string) error {
 
 	m.currentMode = "hls"
 	m.currentLesson = url
+	m.currentStarted = time.Now()
 	m.lessonLoop = false
 
 	if err := m.buildHLSPipeline(url, gstCommand); err != nil {
@@ -183,11 +187,14 @@ func (m *goGstManager) SwitchToHLS(url string, gstCommand string) error {
 }
 
 var (
-	playlistPrepState     PlaylistPreparedState
-	playlistPrepStateMu   sync.Mutex
-	playlistPrerollPath   string
-	playlistCurrentIndex  int
-	playlistFiles         []string
+	playlistPrepState      PlaylistPreparedState
+	playlistPrepStateMu    sync.Mutex
+	playlistPrerollPath    string
+	playlistCurrentIndex   int
+	playlistCurrentFile    string
+	playlistCurrentStarted time.Time
+	playlistFiles          []string
+	playlistFilesMu        sync.Mutex
 )
 
 func init() {
@@ -211,13 +218,13 @@ func (m *goGstManager) preparePlaylistAsync(urls []string, label string) {
 
 	playlistPrepStateMu.Lock()
 	playlistPrepState = PlaylistPreparedState{
-		Preparing:     true,
-		Label:         label,
-		URLs:          urls,
-		URLCount:      len(urls),
-		PlaylistDir:   playlistDir,
-		StartedAtISO:  time.Now().Format("2006-01-02 15:04:05"),
-		UpdatedAtISO:  time.Now().Format("2006-01-02 15:04:05"),
+		Preparing:    true,
+		Label:        label,
+		URLs:         urls,
+		URLCount:     len(urls),
+		PlaylistDir:  playlistDir,
+		StartedAtISO: time.Now().Format("2006-01-02 15:04:05"),
+		UpdatedAtISO: time.Now().Format("2006-01-02 15:04:05"),
 	}
 	playlistPrepStateMu.Unlock()
 
@@ -336,10 +343,10 @@ func findBinary(name string, paths ...string) string {
 }
 
 func (m *goGstManager) LoadPlaylist(Playlist) error { return nil }
-func (m *goGstManager) StartPlaylist() error        { 
+func (m *goGstManager) StartPlaylist() error {
 	return m.startPlaylistPlayback()
 }
-func (m *goGstManager) NextItem() error             { return nil }
+func (m *goGstManager) NextItem() error { return nil }
 
 func (m *goGstManager) Stop() error {
 	m.mu.Lock()
@@ -363,6 +370,13 @@ func (m *goGstManager) GetState() StateResponse {
 	file := m.currentLesson
 	loop := m.lessonLoop
 
+	// For playlist mode, use current playing file
+	playlistFilesMu.Lock()
+	if mode == "playlist" && playlistCurrentFile != "" {
+		file = playlistCurrentFile
+	}
+	playlistFilesMu.Unlock()
+
 	rerunPNG := os.Getenv("RERUN_PNG")
 	overlayEnabled := rerunPNG != "" && mode == "lesson" // Only show overlay for lessons
 
@@ -375,6 +389,21 @@ func (m *goGstManager) GetState() StateResponse {
 	}
 	playlistPrepStateMu.Unlock()
 
+	// Calculate started_at for current item
+	var startedAtISO string
+	if mode == "playlist" {
+		playlistFilesMu.Lock()
+		if !playlistCurrentStarted.IsZero() {
+			startedAtISO = playlistCurrentStarted.Format("2006-01-02 15:04:05")
+		}
+		playlistFilesMu.Unlock()
+	} else {
+		// For lesson, HLS, PNG modes, use currentStarted
+		if !m.currentStarted.IsZero() {
+			startedAtISO = m.currentStarted.Format("2006-01-02 15:04:05")
+		}
+	}
+
 	return StateResponse{
 		Playout: PlayoutState{
 			Running:        running,
@@ -384,6 +413,7 @@ func (m *goGstManager) GetState() StateResponse {
 			Loop:           loop,
 			Overlay:        rerunPNG,
 			OverlayEnabled: overlayEnabled,
+			StartedAtISO:   startedAtISO,
 			HeartbeatISO:   time.Now().Format("2006-01-02 15:04:05"),
 		},
 		Jack: JackState{
@@ -983,8 +1013,8 @@ func buildLessonExplicitBin(path string) (*gst.Bin, *gst.Pad, error) {
 			return nil, nil, fmt.Errorf("link explicit lesson chain with overlay: %w", err)
 		}
 	} else {
-	if err := gst.ElementLinkMany(vq, h264p, dec, vc, vs, vr, caps); err != nil {
-		return nil, nil, fmt.Errorf("link explicit lesson chain: %w", err)
+		if err := gst.ElementLinkMany(vq, h264p, dec, vc, vs, vr, caps); err != nil {
+			return nil, nil, fmt.Errorf("link explicit lesson chain: %w", err)
 		}
 	}
 	if p := caps.GetStaticPad("src"); p != nil {
@@ -1313,7 +1343,7 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 
 				switch msg.Type() {
 				case gst.MessageEOS:
-	m.mu.Lock()
+					m.mu.Lock()
 					shouldLoop := m.lessonLoop
 					loopPath := m.currentLesson
 					m.mu.Unlock()
@@ -1321,7 +1351,7 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 					log.Printf("lesson EOS received, loop=%t, path=%s", shouldLoop, loopPath)
 					if shouldLoop && loopPath != "" {
 						log.Printf("restarting lesson in loop mode")
-		time.Sleep(100 * time.Millisecond)
+						time.Sleep(100 * time.Millisecond)
 						// Call SwitchToLesson without holding any locks
 						if err := m.SwitchToLesson(loopPath, true, nil); err != nil {
 							log.Printf("lesson loop restart failed: %v", err)
@@ -1455,7 +1485,7 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 	}
 
 	parsed, err := gst.NewBinFromString(desc, false)
-			if err != nil {
+	if err != nil {
 		return fmt.Errorf("parse HLS bin: %w", err)
 	}
 	if err := pipe.Add(parsed.Element); err != nil {
@@ -1495,8 +1525,8 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 					log.Printf("HLS bus watch exiting: pipeline changed")
 					return
 				}
-			continue
-		}
+				continue
+			}
 
 			switch msg.Type() {
 			case gst.MessageEOS:
@@ -1637,7 +1667,7 @@ func (m *goGstManager) buildPlaylistPipeline(files []string) error {
 	// Video concat -> interlace -> decklink
 	// Audio concat -> tee -> 36 JACK sinks
 	desc := fmt.Sprintf(`concat name=vcat ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! interlace field-pattern=2:2 top-field-first=true ! decklinkvideosink mode=%d %s sync=true`, fps, modeID, sinkIdent)
-	
+
 	// Audio tee to all JACK ports
 	desc += ` concat name=acat ! tee name=audio_tee`
 	desc += ` audio_tee. ! queue ! jackaudiosink client-name=gst-heb-L port-pattern=20 sync=false`
@@ -1690,7 +1720,7 @@ func (m *goGstManager) buildPlaylistPipeline(files []string) error {
 				desc += fmt.Sprintf(` filesrc location="%s" ! qtdemux name=p%d`, playlistPrerollPath, itemNum)
 				desc += fmt.Sprintf(` p%d.video_0 ! queue ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=%d/1 ! vcat.sink_%d`, itemNum, fps, sinkIndex)
 				desc += fmt.Sprintf(` p%d.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_%d`, itemNum, sinkIndex)
-			sinkIndex++
+				sinkIndex++
 			}
 		}
 
@@ -1728,6 +1758,15 @@ func (m *goGstManager) buildPlaylistPipeline(files []string) error {
 
 	m.pipeline = pipe
 
+	// Set initial file and start time
+	playlistFilesMu.Lock()
+	if len(files) > 0 {
+		playlistCurrentFile = filepath.Base(files[0])
+		playlistCurrentStarted = time.Now()
+		playlistCurrentIndex = 0
+	}
+	playlistFilesMu.Unlock()
+
 	// Add bus message handler for EOS
 	go func() {
 		defer func() {
@@ -1746,38 +1785,56 @@ func (m *goGstManager) buildPlaylistPipeline(files []string) error {
 			msg := bus.TimedPop(100 * time.Millisecond)
 			if msg == nil {
 				// Check if pipeline still exists
-		m.mu.Lock()
+				m.mu.Lock()
 				stillActive := m.pipeline == pipe && m.currentMode == "playlist"
-		m.mu.Unlock()
+				m.mu.Unlock()
 
 				if !stillActive {
 					log.Printf("playlist bus watch exiting: pipeline changed")
-			return
-		}
-			continue
-		}
-
-		switch msg.Type() {
-		case gst.MessageEOS:
-				log.Printf("playlist finished (EOS), switching back to PNG")
-				go func() {
-					if err := m.SwitchToPNG(); err != nil {
-						log.Printf("playlist EOS: failed to switch to PNG: %v", err)
-			} else {
-						log.Printf("playlist EOS: switched to PNG successfully")
+					return
 				}
-				}()
-			return
+				continue
+			}
 
-		case gst.MessageError:
-			err := msg.ParseError()
+			switch msg.Type() {
+			case gst.MessageEOS:
+				log.Printf("playlist finished (EOS), starting lesson-1.mp4 with loop")
+				go func() {
+					// Find lesson-1.mp4 in LATEST_DIR
+					latestDir := os.Getenv("LATEST_DIR")
+					if latestDir == "" {
+						latestDir = "/opt/backup/latest"
+					}
+					lessonPath := filepath.Join(latestDir, "lesson-1.mp4")
+
+					if _, err := os.Stat(lessonPath); err == nil {
+						if err := m.SwitchToLesson(lessonPath, true, nil); err != nil {
+							log.Printf("playlist EOS: failed to start lesson-1: %v", err)
+							// Fallback to PNG if lesson fails
+							if err := m.SwitchToPNG(); err != nil {
+								log.Printf("playlist EOS: failed to switch to PNG: %v", err)
+							}
+						} else {
+							log.Printf("playlist EOS: started lesson-1.mp4 with loop")
+						}
+					} else {
+						log.Printf("playlist EOS: lesson-1.mp4 not found at %s, switching to PNG", lessonPath)
+						if err := m.SwitchToPNG(); err != nil {
+							log.Printf("playlist EOS: failed to switch to PNG: %v", err)
+						}
+					}
+				}()
+				return
+
+			case gst.MessageError:
+				err := msg.ParseError()
 				log.Printf("playlist pipeline error: %s", err.Error())
 				go func() {
 					if err := m.SwitchToPNG(); err != nil {
 						log.Printf("playlist error: failed to switch to PNG: %v", err)
 					}
 				}()
-			return
+				return
 			}
 		}
 	}()
