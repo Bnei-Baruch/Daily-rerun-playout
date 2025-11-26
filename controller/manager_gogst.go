@@ -54,11 +54,11 @@ type goGstManager struct {
 	lessonSinkPad *gst.Pad
 	lessonDecode  *gst.Element
 
-	currentMode      string // "png" or "lesson" or "hls" or "playlist"
-	currentLesson    string
-	currentStarted   time.Time
-	lessonLoop       bool
-	trackMap         map[string]int
+	currentMode    string // "png" or "lesson" or "hls" or "playlist"
+	currentLesson  string
+	currentStarted time.Time
+	lessonLoop     bool
+	trackMap       map[string]int
 }
 
 func NewGoGstManager(m AudioMap) *goGstManager {
