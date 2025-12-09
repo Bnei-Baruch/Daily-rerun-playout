@@ -303,103 +303,6 @@ func handleSourceHLS(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
-// handleSourceHLSMap plays HLS from VOD module with mapped JSON
-// Uses cmd_exec from API but replaces URL with VOD module mapped URL
-func handleSourceHLSMap(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	playlist := vars["playlist"]
-	if playlist == "" {
-		http.Error(w, "playlist is required in URL path", http.StatusBadRequest)
-		return
-	}
-
-	// Fetch cmd_exec from API (same as handleSourceHLS)
-	apiURL := "http://10.66.1.105:8081/api/playlist/list"
-	resp, err := http.Get(apiURL)
-	var playlists map[string]struct {
-		Playlist []struct {
-			HLSPath string `json:"hls_path"`
-			CmdExec string `json:"cmd_exec"`
-		} `json:"playlist"`
-	}
-
-	if err != nil {
-		// Fallback to curl if Go HTTP client fails
-		log.Printf("HLS-Map: Go HTTP client failed (%v), trying curl fallback", err)
-		cmd := exec.Command("curl", "-s", apiURL)
-		output, curlErr := cmd.Output()
-		if curlErr != nil {
-			http.Error(w, fmt.Sprintf("failed to fetch playlist (curl): %v", curlErr), http.StatusInternalServerError)
-			return
-		}
-		if err := json.Unmarshal(output, &playlists); err != nil {
-			http.Error(w, fmt.Sprintf("failed to parse playlist (curl): %v", err), http.StatusInternalServerError)
-			return
-		}
-	} else {
-		defer resp.Body.Close()
-		if err := json.NewDecoder(resp.Body).Decode(&playlists); err != nil {
-			http.Error(w, fmt.Sprintf("failed to parse playlist: %v", err), http.StatusInternalServerError)
-			return
-		}
-	}
-
-	playlistData, ok := playlists[playlist]
-	if !ok || len(playlistData.Playlist) == 0 {
-		http.Error(w, fmt.Sprintf("playlist %s not found", playlist), http.StatusNotFound)
-		return
-	}
-
-	gstCommand := playlistData.Playlist[0].CmdExec
-
-	// Build VOD module mapped URL
-	vodURL := fmt.Sprintf("http://10.66.1.76:8080/hls/%s.json/master.m3u8", playlist)
-
-	// Replace URL in cmd_exec with VOD URL
-	modifiedCmd := replaceHLSURL(gstCommand, vodURL)
-
-	log.Printf("HLS-Map: playlist=%s, vodURL=%s", playlist, vodURL)
-
-	// Type assertion to access HLS method
-	if hlsManager, ok := manager.(interface{ SwitchToHLS(string, string) error }); ok {
-		if err := hlsManager.SwitchToHLS(vodURL, modifiedCmd); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	} else {
-		http.Error(w, "HLS not supported by this manager", http.StatusNotImplemented)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("OK"))
-}
-
-// replaceHLSURL replaces the HLS URL in a gst-launch command
-// Looks for location="..." or location=... pattern and replaces the URL
-func replaceHLSURL(cmd, newURL string) string {
-	// Pattern 1: location="url"
-	if idx := strings.Index(cmd, `location="`); idx != -1 {
-		start := idx + len(`location="`)
-		end := strings.Index(cmd[start:], `"`)
-		if end != -1 {
-			return cmd[:start] + newURL + cmd[start+end:]
-		}
-	}
-	// Pattern 2: location=url (no quotes, ends at space or !)
-	if idx := strings.Index(cmd, "location="); idx != -1 {
-		start := idx + len("location=")
-		// Find end of URL (space or !)
-		end := strings.IndexAny(cmd[start:], " !")
-		if end == -1 {
-			end = len(cmd) - start
-		}
-		return cmd[:start] + newURL + cmd[start+end:]
-	}
-	// No location found, return original
-	return cmd
-}
-
 func handlePlaylistPrepare(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URLs  []string `json:"urls"`
@@ -589,7 +492,6 @@ func main() {
 	r.HandleFunc("/source/lesson", handleSourceLesson).Methods(http.MethodPost)
 	r.HandleFunc("/source/hls", handleSourceHLS).Methods(http.MethodPost)
 	r.HandleFunc("/source/hls/{playlist}", handleSourceHLS).Methods(http.MethodPost)
-	r.HandleFunc("/source/hls-map/{playlist}", handleSourceHLSMap).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/prepare", handlePlaylistPrepare).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/load", handlePlaylistLoad).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/start", handlePlaylistStart).Methods(http.MethodPost)
