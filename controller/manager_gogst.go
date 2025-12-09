@@ -59,6 +59,14 @@ type goGstManager struct {
 	currentStarted time.Time
 	lessonLoop     bool
 	trackMap       map[string]int
+
+	// Timer overlay support (separate pipeline via intervideo)
+	timerPipeline  *gst.Pipeline // Separate pipeline for timer video (unused now)
+	timerPad       *gst.Pad      // compositor sink_1 pad for alpha control (unused now)
+	timerSrc       *gst.Element  // textoverlay element for timer display
+	timerBg        *gst.Element  // gdkpixbufoverlay element for timer background
+	timerVisible   bool          // current visibility state
+	timerCountdown int           // remaining seconds for countdown
 }
 
 func NewGoGstManager(m AudioMap) *goGstManager {
@@ -121,6 +129,10 @@ func (m *goGstManager) SwitchToPNG() error {
 
 	log.Printf("SwitchToPNG: requested")
 
+	// Stop timer pipeline if running
+	m.stopTimerPipeline()
+	m.timerPad = nil
+
 	// Fully tear down any existing pipeline
 	if m.pipeline != nil {
 		_ = m.pipeline.SetState(gst.StateNull)
@@ -157,6 +169,10 @@ func (m *goGstManager) SwitchToHLS(url string, gstCommand string) error {
 		return fmt.Errorf("HLS URL is required")
 	}
 	log.Printf("SwitchToHLS: requested url=%s", url)
+
+	// Stop any existing timer pipeline first
+	m.stopTimerPipeline()
+	m.timerPad = nil
 
 	// Fully tear down any existing pipeline
 	if m.pipeline != nil {
@@ -1446,12 +1462,26 @@ func (m *goGstManager) buildHLSPipeline(url string, gstCommand string) error {
 
 	var desc string
 
+	// Check if timer is available
+	timerPath := os.Getenv("TIMER_PATH")
+	if timerPath == "" {
+		timerPath = "/opt/backup/timer.mov"
+	}
+	_, timerExists := os.Stat(timerPath)
+	useTimer := timerExists == nil
+
 	// If we have a gst-launch command from the API, parse it
 	if gstCommand != "" {
-		log.Printf("HLS: Using pipeline from API cmd_exec")
+		log.Printf("HLS: Using pipeline from API cmd_exec (timer=%v)", useTimer)
 		// Extract the pipeline description from gst-launch command
 		// Format: "gst-launch-1.0 -vvv <pipeline>"
 		desc = extractPipelineFromCommand(gstCommand)
+
+		// Inject timer compositor if timer is available
+		if useTimer {
+			desc = injectTimerCompositor(desc, timerPath)
+		}
+
 		log.Printf("HLS: Extracted pipeline (first 200 chars): %s...", truncate(desc, 200))
 	} else {
 		// Fallback to generic HLS pipeline
@@ -1492,12 +1522,43 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 		return fmt.Errorf("add HLS bin: %w", err)
 	}
 
+	// Setup timer using textoverlay element (no separate pipeline needed)
+	m.timerPad = nil
+	m.timerSrc = nil
+	m.timerVisible = false
+	m.stopTimerPipeline()
+
+	// Get the compositor sink_1 pad and textoverlay for timer control
+	if useTimer && gstCommand != "" {
+		// Get textoverlay for text updates
+		if timerOverlay, err := parsed.GetElementByName("timer"); err == nil && timerOverlay != nil {
+			m.timerSrc = timerOverlay
+			log.Printf("HLS: Timer textoverlay element acquired")
+		} else {
+			log.Printf("HLS: textoverlay element not found: %v", err)
+		}
+		// Get compositor sink_1 pad for alpha control
+		if comp, err := parsed.GetElementByName("mix"); err == nil && comp != nil {
+			if pad := comp.GetStaticPad("sink_1"); pad != nil {
+				m.timerPad = pad
+				log.Printf("HLS: Timer compositor sink_1 pad acquired")
+			} else {
+				log.Printf("HLS: compositor sink_1 pad not found")
+			}
+		} else {
+			log.Printf("HLS: compositor not found: %v", err)
+		}
+	}
+
+	// Now start the main HLS pipeline (shmsrc can connect to the socket)
 	if err := pipe.SetState(gst.StatePlaying); err != nil {
 		logBusErrors("HLS pipeline", pipe)
 		return fmt.Errorf("set HLS pipeline PLAYING: %w", err)
 	}
 
 	m.pipeline = pipe
+
+	// Timer uses textoverlay now, no compositor pad needed
 
 	// Add bus message handler for EOS - switch back to PNG when HLS stream ends
 	go func() {
@@ -1592,6 +1653,198 @@ func extractPipelineFromCommand(cmd string) string {
 	}
 
 	return strings.Join(pipelineParts, " ")
+}
+
+// injectTimerCompositor modifies an HLS pipeline to include a compositor for timer overlay
+// It replaces videomixer with compositor and adds intervideosrc for timer input
+// The timer video comes from a separate pipeline via intervideosink/intervideosrc
+func injectTimerCompositor(pipeline string, timerPath string) string {
+	// Replace "videomixer name=mix" with compositor
+	// The API pipeline typically starts with:
+	// videomixer name=mix ! videoconvert ! interlace ... ! decklinkvideosink ...
+
+	if !strings.Contains(pipeline, "videomixer name=mix") {
+		log.Printf("HLS Timer: pipeline doesn't contain videomixer, skipping timer injection")
+		return pipeline
+	}
+
+	// Replace videomixer with compositor
+	// Add textoverlay for timer countdown instead of mixing video
+	// This avoids all the sync/jitter issues with video mixing
+
+	if !strings.Contains(pipeline, "videomixer name=mix") {
+		log.Printf("HLS Timer: pipeline doesn't contain videomixer, skipping")
+		return pipeline
+	}
+
+	// Insert textoverlay after videomixer output for timer display
+	// Styled: orange text with white outline, bottom-left position, smaller size
+	// Replace videomixer with compositor and add timer box as second input
+	// Timer box: white solid color + textoverlay, positioned at bottom-left
+	modified := strings.Replace(pipeline,
+		"videomixer name=mix",
+		"compositor name=mix sink_1::xpos=80 sink_1::ypos=700 sink_1::alpha=0.0",
+		1)
+
+	// Add the timer box: solid white background with text overlay
+	timerBox := " videotestsrc pattern=solid-color foreground-color=0xFFFFFFFF ! video/x-raw,width=350,height=100,framerate=25/1 ! textoverlay name=timer text=\"\" font-desc=\"Sans 140\" color=0xFFFF8000 halignment=center valignment=top ypad=10 draw-outline=false draw-shadow=false silent=true ! mix.sink_1"
+	modified = modified + timerBox
+
+	log.Printf("HLS Timer: using textoverlay for timer display")
+	return modified
+}
+
+// startTimerPipeline creates and starts a separate pipeline for the timer video
+// This pipeline outputs to intervideosink which is read by the main compositor
+func (m *goGstManager) startTimerPipeline(timerPath string) error {
+	// Stop any existing timer pipeline
+	m.stopTimerPipeline()
+
+	// Create timer pipeline: filesrc -> decode -> intervideosink
+	// Use intervideo to communicate with main pipeline
+	timerDesc := fmt.Sprintf(
+		"filesrc name=timersrc location=%s ! decodebin ! videoconvert ! videoscale ! video/x-raw,width=1920,height=1080 ! intervideosink channel=timer",
+		timerPath)
+
+	timerPipe, err := gst.NewPipelineFromString(timerDesc)
+	if err != nil {
+		return fmt.Errorf("create timer pipeline: %w", err)
+	}
+
+	if err := timerPipe.SetState(gst.StatePlaying); err != nil {
+		return fmt.Errorf("start timer pipeline: %w", err)
+	}
+
+	m.timerPipeline = timerPipe
+	log.Printf("Timer: separate pipeline started (file=%s)", timerPath)
+	return nil
+}
+
+// stopTimerPipeline stops and cleans up the timer pipeline
+func (m *goGstManager) stopTimerPipeline() {
+	if m.timerPipeline != nil {
+		_ = m.timerPipeline.SetState(gst.StateNull)
+		m.timerPipeline = nil
+		log.Printf("Timer: pipeline stopped")
+	}
+}
+
+// ShowTimerOverlay shows the timer overlay at the specified countdown position
+// seekMs is the countdown time remaining (e.g., 300000 = 5 min countdown)
+// Timer video is 15 min, so we seek to (15*60*1000 - seekMs)
+func (m *goGstManager) ShowTimerOverlay(seekMs int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.currentMode != "hls" {
+		return fmt.Errorf("timer overlay only available during HLS playback")
+	}
+
+	if m.timerSrc == nil {
+		return fmt.Errorf("timer textoverlay not available - make sure TIMER_PATH is set and using /source/hls with playlist")
+	}
+
+	// Convert seekMs to seconds for countdown
+	remainingSeconds := int(seekMs / 1000)
+	if remainingSeconds < 0 {
+		remainingSeconds = 0
+	}
+	if remainingSeconds > 15*60 {
+		remainingSeconds = 15 * 60
+	}
+
+	// Format as MM:SS
+	mins := remainingSeconds / 60
+	secs := remainingSeconds % 60
+	timerText := fmt.Sprintf("%02d:%02d", mins, secs)
+
+	// Set text and show overlay
+	if err := m.timerSrc.SetProperty("text", timerText); err != nil {
+		return fmt.Errorf("failed to set timer text: %w", err)
+	}
+	if err := m.timerSrc.SetProperty("silent", false); err != nil {
+		return fmt.Errorf("failed to show timer: %w", err)
+	}
+	// Show timer box by setting compositor sink_1 alpha to 1.0
+	if m.timerPad != nil {
+		if err := m.timerPad.SetProperty("alpha", float64(1.0)); err != nil {
+			log.Printf("Timer: failed to show timer box: %v", err)
+		} else {
+			log.Printf("Timer: box shown (alpha=1.0)")
+		}
+	}
+
+	m.timerVisible = true
+	m.timerCountdown = remainingSeconds
+
+	// Start countdown goroutine
+	go m.runTimerCountdown()
+
+	log.Printf("Timer: showing %s countdown", timerText)
+	return nil
+}
+
+// HideTimerOverlay hides the timer overlay
+func (m *goGstManager) HideTimerOverlay() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.timerSrc == nil {
+		return fmt.Errorf("timer textoverlay not available")
+	}
+
+	// Hide the text overlay
+	if err := m.timerSrc.SetProperty("silent", true); err != nil {
+		return fmt.Errorf("failed to hide timer: %w", err)
+	}
+	// Hide timer box by setting compositor sink_1 alpha to 0.0
+	if m.timerPad != nil {
+		if err := m.timerPad.SetProperty("alpha", float64(0.0)); err != nil {
+			log.Printf("Timer: failed to hide timer box: %v", err)
+		} else {
+			log.Printf("Timer: box hidden (alpha=0.0)")
+		}
+	}
+
+	log.Printf("Timer: hiding overlay")
+	m.timerVisible = false
+	m.timerCountdown = 0
+	return nil
+}
+
+// runTimerCountdown updates the timer text every second
+func (m *goGstManager) runTimerCountdown() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		m.mu.Lock()
+		if !m.timerVisible || m.timerCountdown <= 0 || m.timerSrc == nil {
+			m.mu.Unlock()
+			return
+		}
+
+		m.timerCountdown--
+		mins := m.timerCountdown / 60
+		secs := m.timerCountdown % 60
+		timerText := fmt.Sprintf("%02d:%02d", mins, secs)
+
+		if err := m.timerSrc.SetProperty("text", timerText); err != nil {
+			log.Printf("Timer: failed to update text: %v", err)
+			m.mu.Unlock()
+			return
+		}
+
+		if m.timerCountdown <= 0 {
+			// Auto-hide when countdown reaches 0
+			_ = m.timerSrc.SetProperty("silent", true)
+			m.timerVisible = false
+			log.Printf("Timer: countdown finished, hiding")
+			m.mu.Unlock()
+			return
+		}
+		m.mu.Unlock()
+	}
 }
 
 // truncate returns the first n characters of s

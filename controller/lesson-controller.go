@@ -303,6 +303,51 @@ func handleSourceHLS(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
+func handleOverlayTimerShow(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SeekMs int64 `json:"seek_ms"` // Not used for now, but kept for API compatibility
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	if timerManager, ok := manager.(interface{ ShowTimerOverlay(int64) error }); ok {
+		if err := timerManager.ShowTimerOverlay(req.SeekMs); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		http.Error(w, "timer overlay not supported by this manager", http.StatusNotImplemented)
+		return
+	}
+
+	log.Printf("timer: showing overlay")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":      true,
+		"message": "timer overlay shown",
+	})
+}
+
+func handleOverlayTimerHide(w http.ResponseWriter, r *http.Request) {
+	if timerManager, ok := manager.(interface{ HideTimerOverlay() error }); ok {
+		if err := timerManager.HideTimerOverlay(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		http.Error(w, "timer overlay not supported by this manager", http.StatusNotImplemented)
+		return
+	}
+
+	log.Printf("timer: hiding overlay")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok":      true,
+		"message": "timer overlay hidden",
+	})
+}
+
 func handlePlaylistPrepare(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		URLs  []string `json:"urls"`
@@ -492,6 +537,8 @@ func main() {
 	r.HandleFunc("/source/lesson", handleSourceLesson).Methods(http.MethodPost)
 	r.HandleFunc("/source/hls", handleSourceHLS).Methods(http.MethodPost)
 	r.HandleFunc("/source/hls/{playlist}", handleSourceHLS).Methods(http.MethodPost)
+	r.HandleFunc("/overlay/timer/show", handleOverlayTimerShow).Methods(http.MethodPost)
+	r.HandleFunc("/overlay/timer/hide", handleOverlayTimerHide).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/prepare", handlePlaylistPrepare).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/load", handlePlaylistLoad).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/start", handlePlaylistStart).Methods(http.MethodPost)
