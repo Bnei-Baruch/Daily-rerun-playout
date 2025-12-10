@@ -1029,8 +1029,8 @@ func buildLessonExplicitBin(path string) (*gst.Bin, *gst.Pad, error) {
 			return nil, nil, fmt.Errorf("link explicit lesson chain with overlay: %w", err)
 		}
 	} else {
-	if err := gst.ElementLinkMany(vq, h264p, dec, vc, vs, vr, caps); err != nil {
-		return nil, nil, fmt.Errorf("link explicit lesson chain: %w", err)
+		if err := gst.ElementLinkMany(vq, h264p, dec, vc, vs, vr, caps); err != nil {
+			return nil, nil, fmt.Errorf("link explicit lesson chain: %w", err)
 		}
 	}
 	if p := caps.GetStaticPad("src"); p != nil {
@@ -1359,7 +1359,7 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 
 				switch msg.Type() {
 				case gst.MessageEOS:
-	m.mu.Lock()
+					m.mu.Lock()
 					shouldLoop := m.lessonLoop
 					loopPath := m.currentLesson
 					m.mu.Unlock()
@@ -1367,7 +1367,7 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 					log.Printf("lesson EOS received, loop=%t, path=%s", shouldLoop, loopPath)
 					if shouldLoop && loopPath != "" {
 						log.Printf("restarting lesson in loop mode")
-		time.Sleep(100 * time.Millisecond)
+						time.Sleep(100 * time.Millisecond)
 						// Call SwitchToLesson without holding any locks
 						if err := m.SwitchToLesson(loopPath, true, nil); err != nil {
 							log.Printf("lesson loop restart failed: %v", err)
@@ -1478,7 +1478,7 @@ func (m *goGstManager) buildHLSPipeline(url string, gstCommand string) error {
 		}
 
 		log.Printf("HLS: Extracted pipeline (first 200 chars): %s...", truncate(desc, 200))
-			} else {
+	} else {
 		// Fallback to generic HLS pipeline
 		log.Printf("HLS: Using generic fallback pipeline")
 		modeName := decklinkModeString()
@@ -1510,7 +1510,7 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 	}
 
 	parsed, err := gst.NewBinFromString(desc, false)
-		if err != nil {
+	if err != nil {
 		return fmt.Errorf("parse HLS bin: %w", err)
 	}
 	if err := pipe.Add(parsed.Element); err != nil {
@@ -1537,7 +1537,7 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 			if pad := comp.GetStaticPad("sink_1"); pad != nil {
 				m.timerPad = pad
 				log.Printf("HLS: Timer compositor sink_1 pad acquired")
-	} else {
+			} else {
 				log.Printf("HLS: compositor sink_1 pad not found")
 			}
 		} else {
@@ -1573,33 +1573,33 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 			msg := bus.TimedPop(100 * time.Millisecond)
 			if msg == nil {
 				// Check if pipeline still exists
-		m.mu.Lock()
+				m.mu.Lock()
 				stillActive := m.pipeline == pipe && m.currentMode == "hls"
-		m.mu.Unlock()
+				m.mu.Unlock()
 
 				if !stillActive {
 					log.Printf("HLS bus watch exiting: pipeline changed")
-			return
-		}
-			continue
-		}
+					return
+				}
+				continue
+			}
 
-		switch msg.Type() {
-		case gst.MessageEOS:
+			switch msg.Type() {
+			case gst.MessageEOS:
 				log.Printf("HLS stream finished (EOS), switching back to PNG")
 
 				// Switch back to PNG
 				go func() {
 					if err := m.SwitchToPNG(); err != nil {
 						log.Printf("HLS EOS: failed to switch to PNG: %v", err)
-			} else {
+					} else {
 						log.Printf("HLS EOS: switched to PNG successfully")
-				}
+					}
 				}()
-			return
+				return
 
-		case gst.MessageError:
-			err := msg.ParseError()
+			case gst.MessageError:
+				err := msg.ParseError()
 				log.Printf("HLS pipeline error: %s", err.Error())
 
 				// On error, also switch back to PNG
@@ -1816,8 +1816,8 @@ func (m *goGstManager) runTimerCountdown() {
 		m.mu.Lock()
 		if !m.timerVisible || m.timerCountdown <= 0 || m.timerSrc == nil {
 			m.mu.Unlock()
-		return
-	}
+			return
+		}
 
 		m.timerCountdown--
 		mins := m.timerCountdown / 60
@@ -1826,7 +1826,7 @@ func (m *goGstManager) runTimerCountdown() {
 
 		if err := m.timerSrc.SetProperty("text", timerText); err != nil {
 			log.Printf("Timer: failed to update text: %v", err)
-	m.mu.Unlock()
+			m.mu.Unlock()
 			return
 		}
 
@@ -1886,8 +1886,8 @@ func (m *goGstManager) startPlaylistPlayback() error {
 	}
 
 	log.Printf("playlist playback: started with %d files", len(files))
-		return nil
-	}
+	return nil
+}
 
 // buildPlaylistPipeline creates a concat-based pipeline for playlist playback
 // Structure: [preroll -> file -> png] repeated for each file
@@ -2023,15 +2023,15 @@ func (m *goGstManager) buildPlaylistPipeline(files []string) error {
 			}
 		}()
 
-	bus := pipe.GetBus()
-	if bus == nil {
+		bus := pipe.GetBus()
+		if bus == nil {
 			log.Printf("playlist: no bus available")
 			return
-	}
+		}
 
 		for {
 			msg := bus.TimedPop(100 * time.Millisecond)
-	if msg == nil {
+			if msg == nil {
 				// Check if pipeline still exists
 				m.mu.Lock()
 				stillActive := m.pipeline == pipe && m.currentMode == "playlist"
@@ -2075,7 +2075,7 @@ func (m *goGstManager) buildPlaylistPipeline(files []string) error {
 				return
 
 			case gst.MessageError:
-		err := msg.ParseError()
+				err := msg.ParseError()
 				log.Printf("playlist pipeline error: %s", err.Error())
 				go func() {
 					if err := m.SwitchToPNG(); err != nil {
