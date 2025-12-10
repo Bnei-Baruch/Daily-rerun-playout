@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -304,15 +305,27 @@ func handleSourceHLS(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleOverlayTimerShow(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		SeekMs int64 `json:"seek_ms"` // Not used for now, but kept for API compatibility
-	}
-	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+	var seekMs int64
+
+	// Check for URL path parameter first
+	vars := mux.Vars(r)
+	if seekMsStr, ok := vars["seek_ms"]; ok {
+		if val, err := strconv.ParseInt(seekMsStr, 10, 64); err == nil {
+			seekMs = val
+		}
+	} else {
+		// Fall back to JSON body
+		var req struct {
+			SeekMs int64 `json:"seek_ms"`
+		}
+		if r.Body != nil {
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			seekMs = req.SeekMs
+		}
 	}
 
 	if timerManager, ok := manager.(interface{ ShowTimerOverlay(int64) error }); ok {
-		if err := timerManager.ShowTimerOverlay(req.SeekMs); err != nil {
+		if err := timerManager.ShowTimerOverlay(seekMs); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -538,6 +551,7 @@ func main() {
 	r.HandleFunc("/source/hls", handleSourceHLS).Methods(http.MethodPost)
 	r.HandleFunc("/source/hls/{playlist}", handleSourceHLS).Methods(http.MethodPost)
 	r.HandleFunc("/overlay/timer/show", handleOverlayTimerShow).Methods(http.MethodPost)
+	r.HandleFunc("/overlay/timer/show/{seek_ms}", handleOverlayTimerShow).Methods(http.MethodPost)
 	r.HandleFunc("/overlay/timer/hide", handleOverlayTimerHide).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/prepare", handlePlaylistPrepare).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/load", handlePlaylistLoad).Methods(http.MethodPost)
