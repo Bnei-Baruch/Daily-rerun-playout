@@ -4,6 +4,7 @@ type PipelineManager interface {
 	BuildPipeline() error
 	SwitchToPNG() error
 	SwitchToLesson(path string, loop bool, trackMap map[string]int) error
+	SwitchToClip(path string) error
 	LoadPlaylist(p Playlist) error
 	StartPlaylist() error
 	NextItem() error
@@ -22,7 +23,7 @@ type StateResponse struct {
 // PlayoutState represents the current playout state
 type PlayoutState struct {
 	Running        bool          `json:"running"`
-	Mode           string        `json:"mode"` // "png", "lesson", or "playlist"
+	Mode           string        `json:"mode"` // "png", "lesson", "clip", "hls", or "playlist"
 	Label          string        `json:"label,omitempty"`
 	File           string        `json:"file,omitempty"`
 	PID            int           `json:"pid"`

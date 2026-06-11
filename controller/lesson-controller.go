@@ -213,6 +213,29 @@ func handleSourceLesson(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("OK"))
 }
 
+func handleSourceClip(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Path == "" {
+		req.Path = os.Getenv("CLIP_PATH")
+	}
+	if req.Path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if err := manager.SwitchToClip(req.Path); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("OK"))
+}
+
 func handleSourceHLS(w http.ResponseWriter, r *http.Request) {
 	// Check if playlist is in URL path
 	vars := mux.Vars(r)
@@ -587,6 +610,7 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/source/png", handleSourcePNG).Methods(http.MethodPost)
 	r.HandleFunc("/source/lesson", handleSourceLesson).Methods(http.MethodPost)
+	r.HandleFunc("/source/clip", handleSourceClip).Methods(http.MethodPost)
 	r.HandleFunc("/source/hls", handleSourceHLS).Methods(http.MethodPost)
 	r.HandleFunc("/source/hls/{playlist}", handleSourceHLS).Methods(http.MethodPost)
 	r.HandleFunc("/source/hls-map/{playlist}", handleSourceHLSMap).Methods(http.MethodPost)

@@ -149,6 +149,42 @@ func (m *goGstManager) SwitchToPNG() error {
 	return nil
 }
 
+func (m *goGstManager) SwitchToClip(path string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if path == "" {
+		return fmt.Errorf("path is required")
+	}
+	log.Printf("SwitchToClip: requested path=%s", path)
+
+	if m.pipeline != nil {
+		_ = m.pipeline.SetState(gst.StateNull)
+	}
+	m.pipeline = nil
+	m.vsel = nil
+	m.deckBin = nil
+	m.pngBin = nil
+	m.pngPad = nil
+	m.pngSinkPad = nil
+	m.lessonBin = nil
+	m.lessonPad = nil
+	m.lessonSinkPad = nil
+	m.lessonDecode = nil
+
+	m.currentMode = "clip"
+	m.currentLesson = path
+	m.currentStarted = time.Now()
+	m.lessonLoop = true
+
+	if err := m.buildClipOnlyPipeline(path); err != nil {
+		return fmt.Errorf("build clip-only pipeline: %w", err)
+	}
+
+	log.Printf("SwitchToClip: now playing %s", path)
+	return nil
+}
+
 func (m *goGstManager) SwitchToHLS(url string, gstCommand string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1365,6 +1401,142 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 				case gst.MessageError:
 					err := msg.ParseError()
 					log.Printf("pipeline bus error: %v", err)
+				}
+			}
+		}()
+	}
+
+	m.pipeline = pipe
+	m.vsel = nil
+	m.deckBin = nil
+	m.lessonBin = parsed
+	m.lessonPad = nil
+	m.lessonSinkPad = nil
+	m.lessonDecode = nil
+	m.pngBin = nil
+	m.pngPad = nil
+	m.pngSinkPad = nil
+
+	return nil
+}
+
+func (m *goGstManager) buildClipOnlyPipeline(path string) error {
+	gst.Init(nil)
+
+	pipe, err := gst.NewPipeline("clip-only")
+	if err != nil {
+		return err
+	}
+
+	modeID := decklinkModeEnum(decklinkModeString())
+	sinkIdent := decklinkSinkIdentifier()
+
+	// Video: same decode chain as lesson.
+	// Audio: single stereo track decoded once, tee'd into:
+	//   - deinterleave → Hebrew L (port 20) and R (port 21)
+	//   - audioconvert downmix → mono tee → all 34 language ports
+	descTemplate := `filesrc location=%s ! qtdemux name=dem
+dem.video_0 ! queue ! h264parse config-interval=-1 ! avdec_h264 ! videoconvert ! videoscale ! videorate !
+video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1 ! interlace field-pattern=2:2 top-field-first=true !
+decklinkvideosink mode=%d %s sync=true
+dem.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample !
+audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! tee name=stereo_tee
+stereo_tee. ! queue ! deinterleave name=heb
+heb.src_0 ! queue ! jackaudiosink client-name=gst-heb-L port-pattern=20 sync=false
+heb.src_1 ! queue ! jackaudiosink client-name=gst-heb-R port-pattern=21 sync=false
+stereo_tee. ! queue ! audioconvert ! audio/x-raw,rate=48000,channels=1,format=F32LE ! tee name=mono_tee
+mono_tee. ! queue ! jackaudiosink client-name=gst-fr  port-pattern=1  sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-it  port-pattern=2  sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-de  port-pattern=3  sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-tr  port-pattern=4  sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-pt  port-pattern=5  sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-bg  port-pattern=6  sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-ka  port-pattern=7  sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-ro  port-pattern=8  sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-hu  port-pattern=9  sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-sv  port-pattern=10 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-lt  port-pattern=11 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-hr  port-pattern=12 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-ja  port-pattern=13 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-sl  port-pattern=14 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-pl  port-pattern=15 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-no  port-pattern=16 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-lv  port-pattern=17 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-uk  port-pattern=18 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-nl  port-pattern=19 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-ru  port-pattern=22 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-zh  port-pattern=23 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-am  port-pattern=24 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-hi  port-pattern=25 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-fa  port-pattern=26 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-ar  port-pattern=27 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-id  port-pattern=28 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-en  port-pattern=29 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-es  port-pattern=30 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-hy  port-pattern=32 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-da  port-pattern=33 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-et  port-pattern=34 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-el  port-pattern=35 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-tl  port-pattern=36 sync=false
+mono_tee. ! queue ! jackaudiosink client-name=gst-az  port-pattern=37 sync=false`
+
+	desc := fmt.Sprintf(descTemplate, filepath.Clean(path), modeID, sinkIdent)
+
+	parsed, err := gst.NewBinFromString(desc, false)
+	if err != nil {
+		return fmt.Errorf("parse clip-only bin: %w", err)
+	}
+	if err := pipe.Add(parsed.Element); err != nil {
+		return fmt.Errorf("add clip-only bin: %w", err)
+	}
+
+	if err := pipe.SetState(gst.StatePlaying); err != nil {
+		logBusErrors("pipeline", pipe)
+		return fmt.Errorf("set PLAYING: %w", err)
+	}
+
+	bus := pipe.GetBus()
+	if bus != nil {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("clip bus watch recovered from panic: %v", r)
+				}
+			}()
+
+			for {
+				m.mu.Lock()
+				stillActive := m.pipeline == pipe
+				m.mu.Unlock()
+				if !stillActive {
+					log.Printf("clip bus watch exiting: pipeline changed")
+					return
+				}
+
+				msg := bus.TimedPop(100 * time.Millisecond)
+				if msg == nil {
+					continue
+				}
+
+				switch msg.Type() {
+				case gst.MessageEOS:
+					m.mu.Lock()
+					loopPath := m.currentLesson
+					m.mu.Unlock()
+
+					log.Printf("clip EOS received, restarting loop path=%s", loopPath)
+					if loopPath != "" {
+						time.Sleep(100 * time.Millisecond)
+						if err := m.SwitchToClip(loopPath); err != nil {
+							log.Printf("clip loop restart failed: %v", err)
+						} else {
+							log.Printf("clip loop restarted successfully")
+						}
+						return
+					}
+				case gst.MessageError:
+					err := msg.ParseError()
+					log.Printf("clip pipeline bus error: %v", err)
 				}
 			}
 		}()
