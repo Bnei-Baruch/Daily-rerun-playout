@@ -1,0 +1,228 @@
+# last frame capture with ffmpeg
+ffmpeg -y -sseof -1 -i /opt/backup/latest/lesson-1.mp4 -frames:v 1 /tmp/last.png
+#working playlist with preroll gst pipeline
+gst-launch-1.0 -e concat name=vcat ! videoconvert ! decklinkvideosink device-number=0 mode=1080p25 concat name=acat ! tee name=audio_tee audio_tee. ! queue ! jackaudiosink client-name=gst-heb-L port-pattern=20 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-heb-R port-pattern=21 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-en port-pattern=29 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-ru port-pattern=22 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-es port-pattern=30 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-fr port-pattern=1 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-it port-pattern=2 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-de port-pattern=3 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-tr port-pattern=4 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-pt port-pattern=5 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-bg port-pattern=6 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-ka port-pattern=7 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-ro port-pattern=8 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-hu port-pattern=9 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-sv port-pattern=10 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-lt port-pattern=11 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-hr port-pattern=12 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-ja port-pattern=13 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-sl port-pattern=14 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-pl port-pattern=15 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-no port-pattern=16 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-lv port-pattern=17 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-uk port-pattern=18 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-nl port-pattern=19 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-zh port-pattern=23 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-am port-pattern=24 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-hi port-pattern=25 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-fa port-pattern=26 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-ar port-pattern=27 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-id port-pattern=28 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-hy port-pattern=32 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-da port-pattern=33 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-et port-pattern=34 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-el port-pattern=35 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-tl port-pattern=36 sync=false audio_tee. ! queue ! jackaudiosink client-name=gst-az port-pattern=37 sync=false filesrc location='/Users/shidur/30sec.mp4' ! qtdemux name=d1 d1.video_0 ! queue ! h264parse ! decodebin ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1 ! vcat.sink_0 d1.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! acat.sink_0 filesrc location='/opt/backup/playlist/url_1.mp4' ! qtdemux name=d2 d2.video_0 ! queue ! h264parse ! decodebin ! videoconvert ! videoscale ! videorate ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1 ! vcat.sink_1 d2.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! acat.sink_1"
+#working png playback
+gst-launch-1.0 -e -v filesrc location=/opt/backup/playlist/last_frame.png ! decodebin ! imagefreeze ! videoscale ! videoconvert ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1 ! identity eos-after=$((25*7)) ! decklinkvideosink device-number=0 mode=1080p25 sync=true
+
+# working gst with preroll and png for 1 file
+SEC=5
+PNG='/opt/backup/playlist/last_frame.png'
+gst-launch-1.0 -e \
+  concat name=vcat ! videoconvert ! decklinkvideosink device-number=0 mode=1080p25 \
+  concat name=acat ! tee name=audio_tee \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-heb-L port-pattern=20 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-heb-R port-pattern=21 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-en    port-pattern=29 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-ru    port-pattern=22 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-es    port-pattern=30 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-fr    port-pattern=1  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-it    port-pattern=2  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-de    port-pattern=3  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-tr    port-pattern=4  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-pt    port-pattern=5  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-bg    port-pattern=6  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-ka    port-pattern=7  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-ro    port-pattern=8  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-hu    port-pattern=9  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-sv    port-pattern=10 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-lt    port-pattern=11 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-hr    port-pattern=12 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-ja    port-pattern=13 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-sl    port-pattern=14 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-pl    port-pattern=15 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-no    port-pattern=16 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-lv    port-pattern=17 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-uk    port-pattern=18 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-nl    port-pattern=19 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-zh    port-pattern=23 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-am    port-pattern=24 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-hi    port-pattern=25 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-fa    port-pattern=26 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-ar    port-pattern=27 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-id    port-pattern=28 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-hy    port-pattern=32 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-da    port-pattern=33 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-et    port-pattern=34 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-el    port-pattern=35 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-tl    port-pattern=36 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-az    port-pattern=37 sync=false \
+  filesrc location='/Users/shidur/30sec.mp4' ! qtdemux name=d1 \
+    d1.video_0 ! queue ! h264parse ! decodebin ! videoconvert ! videoscale ! videorate \
+      ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1 ! vcat.sink_0 \
+    d1.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample \
+      ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_0 \
+  filesrc location='/opt/backup/playlist/url_1.mp4' ! qtdemux name=d2 \
+    d2.video_0 ! queue ! h264parse ! decodebin ! videoconvert ! videoscale ! videorate \
+      ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1 ! vcat.sink_1 \
+    d2.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample \
+      ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_1 \
+  filesrc location="$PNG" ! decodebin ! queue ! imagefreeze \
+    ! videoscale ! videoconvert ! videorate \
+    ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1 \
+    ! identity eos-after=$((25*SEC)) ! vcat.sink_2 \
+  audiotestsrc wave=silence samplesperbuffer=480 num-buffers=$((100*SEC)) \
+    ! audioconvert ! audioresample \
+    ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_2
+
+
+
+# working gst with preroll and png for 3 files
+DIR='/opt/backup/playlist'
+PREROLL='/Users/shidur/30sec.mp4'
+FPS=25
+SEC_LAST=5
+V_FRAMES=$((25*SEC_LAST))         
+A_NUMBUF=$((100*SEC_LAST))
+gst-launch-1.0 -e \
+  concat name=vcat ! videoconvert ! decklinkvideosink device-number=0 mode=1080p25 \
+  concat name=acat ! tee name=audio_tee \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-heb-L port-pattern=20 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-heb-R port-pattern=21 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-en    port-pattern=29 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-ru    port-pattern=22 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-es    port-pattern=30 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-fr    port-pattern=1  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-it    port-pattern=2  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-de    port-pattern=3  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-tr    port-pattern=4  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-pt    port-pattern=5  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-bg    port-pattern=6  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-ka    port-pattern=7  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-ro    port-pattern=8  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-hu    port-pattern=9  sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-sv    port-pattern=10 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-lt    port-pattern=11 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-hr    port-pattern=12 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-ja    port-pattern=13 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-sl    port-pattern=14 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-pl    port-pattern=15 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-no    port-pattern=16 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-lv    port-pattern=17 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-uk    port-pattern=18 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-nl    port-pattern=19 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-zh    port-pattern=23 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-am    port-pattern=24 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-hi    port-pattern=25 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-fa    port-pattern=26 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-ar    port-pattern=27 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-id    port-pattern=28 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-hy    port-pattern=32 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-da    port-pattern=33 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-et    port-pattern=34 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-el    port-pattern=35 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-tl    port-pattern=36 sync=false \
+  audio_tee. ! queue ! jackaudiosink client-name=gst-az    port-pattern=37 sync=false \
+  \
+  filesrc location="$PREROLL" ! qtdemux name=p1 \
+    p1.video_0 ! queue ! h264parse ! decodebin ! videoconvert ! videoscale ! videorate \
+      ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=${FPS}/1 ! vcat.sink_0 \
+    p1.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample \
+      ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_0 \
+  filesrc location="$DIR/url_1.mp4" ! qtdemux name=u1 \
+    u1.video_0 ! queue ! h264parse ! decodebin ! videoconvert ! videoscale ! videorate \
+      ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=${FPS}/1 ! vcat.sink_1 \
+    u1.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample \
+      ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_1 \
+  filesrc location="$DIR/last_frame-1.png" ! decodebin ! queue ! imagefreeze \
+    ! videoscale ! videoconvert ! videorate \
+    ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=${FPS}/1 \
+    ! identity eos-after=${V_FRAMES} ! vcat.sink_2 \
+  audiotestsrc wave=silence samplesperbuffer=480 num-buffers=${A_NUMBUF} \
+    ! audioconvert ! audioresample \
+    ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_2 \
+  \
+  filesrc location="$PREROLL" ! qtdemux name=p2 \
+    p2.video_0 ! queue ! h264parse ! decodebin ! videoconvert ! videoscale ! videorate \
+      ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=${FPS}/1 ! vcat.sink_3 \
+    p2.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample \
+      ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_3 \
+  filesrc location="$DIR/url_2.mp4" ! qtdemux name=u2 \
+    u2.video_0 ! queue ! h264parse ! decodebin ! videoconvert ! videoscale ! videorate \
+      ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=${FPS}/1 ! vcat.sink_4 \
+    u2.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample \
+      ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_4 \
+  filesrc location="$DIR/last_frame-2.png" ! decodebin ! queue ! imagefreeze \
+    ! videoscale ! videoconvert ! videorate \
+    ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=${FPS}/1 \
+    ! identity eos-after=${V_FRAMES} ! vcat.sink_5 \
+  audiotestsrc wave=silence samplesperbuffer=480 num-buffers=${A_NUMBUF} \
+    ! audioconvert ! audioresample \
+    ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_5 \
+  \
+  filesrc location="$PREROLL" ! qtdemux name=p3 \
+    p3.video_0 ! queue ! h264parse ! decodebin ! videoconvert ! videoscale ! videorate \
+      ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=${FPS}/1 ! vcat.sink_6 \
+    p3.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample \
+      ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_6 \
+  filesrc location="$DIR/url_3.mp4" ! qtdemux name=u3 \
+    u3.video_0 ! queue ! h264parse ! decodebin ! videoconvert ! videoscale ! videorate \
+      ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=${FPS}/1 ! vcat.sink_7 \
+    u3.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample \
+      ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_7 \
+  filesrc location="$DIR/last_frame-3.png" ! decodebin ! queue ! imagefreeze \
+    ! videoscale ! videoconvert ! videorate \
+    ! video/x-raw,format=UYVY,width=1920,height=1080,framerate=${FPS}/1 \
+    ! identity eos-after=${V_FRAMES} ! vcat.sink_8 \
+  audiotestsrc wave=silence samplesperbuffer=480 num-buffers=${A_NUMBUF} \
+    ! audioconvert ! audioresample \
+    ! audio/x-raw,rate=48000,channels=2,format=F32LE,layout=interleaved ! acat.sink_8
+
+
+# working pipeline for local file
+
+  gst-launch-1.0 -e -vvv \
+  filesrc location="/opt/backup/latest/lesson-1.mp4" ! \
+  queue2 use-buffering=true max-size-time=3000000000 ! \
+  qtdemux name=d \
+  d.video_0 ! queue max-size-time=2000000000 ! h264parse ! vtdec ! \
+    videoconvert ! videoscale ! videorate drop-only=true ! \
+    video/x-raw,format=UYVY,width=1920,height=1080,framerate=25/1,interlace-mode=progressive ! \
+    interlace field-pattern=2:2 top-field-first=true ! \
+    video/x-raw,format=UYVY,interlace-mode=interleaved,field-order=top-field-first,framerate=25/1 ! \
+    queue leaky=downstream max-size-time=0 max-size-bytes=0 max-size-buffers=0 ! \
+    decklinkvideosink mode=1080i50 sync=true qos=true max-lateness=20000000 \
+  d.audio_0 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample \
+  ! audio/x-raw,rate=48000,channels=2,format=F32LE ! tee name=audio_tee
+    audio_tee. ! queue ! jackaudiosink client-name=gst-heb-L port-pattern=20 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-heb-R port-pattern=21 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-en  port-pattern=29 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-ru  port-pattern=22 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-es  port-pattern=30 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-fr  port-pattern=1  sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-it  port-pattern=2  sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-de  port-pattern=3  sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-tr  port-pattern=4  sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-pt  port-pattern=5  sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-bg  port-pattern=6  sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-ka  port-pattern=7  sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-ro  port-pattern=8  sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-hu  port-pattern=9  sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-sv  port-pattern=10 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-lt  port-pattern=11 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-hr  port-pattern=12 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-ja  port-pattern=13 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-sl  port-pattern=14 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-pl  port-pattern=15 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-no  port-pattern=16 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-lv  port-pattern=17 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-uk  port-pattern=18 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-nl  port-pattern=19 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-zh  port-pattern=23 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-am  port-pattern=24 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-hi  port-pattern=25 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-fa  port-pattern=26 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-ar  port-pattern=27 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-id  port-pattern=28 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-hy  port-pattern=32 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-da  port-pattern=33 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-et  port-pattern=34 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-el  port-pattern=35 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-tl  port-pattern=36 sync=false \
+    audio_tee. ! queue ! jackaudiosink client-name=gst-az  port-pattern=37 sync=false
+
+
+
+
+
+    {"pipeline":{"id":"playlist_02_1755995433","command":"gst-launch-1.0 -vv urisourcebin uri=https://src.bbdomain.org/2006/08/14/heb_s_rav_2006-08-14_lesson_bs-pticha_n1.mp4/clipFrom/1543000/clipTo/3210000/master.m3u8 parse-streams=true name=src src. ! queue ! capsfilter caps=video/x-h264 ! h264parse ! vtdec ! videoconvert ! videoscale ! video/x-raw,width=1920,height=1080 ! interlace field-pattern=2:2 top-field-first=true ! decklinkvideosink mode=1080i50 src. ! queue ! capsfilter caps=audio/mpeg ! aacparse ! fdkaacdec ! audioconvert ! audio/x-raw,channels=2 ! audioresample ! audio/x-raw,rate=48000 ! deinterleave name=d d.src_0 ! queue ! audioconvert ! jackaudiosink client-name=gst-heb-L port-pattern=20 d.src_1 ! queue ! audioconvert ! jackaudiosink client-name=gst-heb-R port-pattern=21","state":0,"config":{"file_name":"02","isHls":false,"hls_path":"","cmd_exec":""},"languages":null,"created_at":"2025-08-24T03:30:33.25613+03:00"},"message":"Pipeline stopped","success":true}
