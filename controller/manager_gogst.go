@@ -1504,6 +1504,8 @@ mono_tee. ! queue ! jackaudiosink client-name=gst-az  port-pattern=37 sync=false
 				}
 			}()
 
+			plays := 0 // incremented on each EOS; seek on first, switch to PNG on second
+
 			for {
 				m.mu.Lock()
 				stillActive := m.pipeline == pipe
@@ -1521,16 +1523,30 @@ mono_tee. ! queue ! jackaudiosink client-name=gst-az  port-pattern=37 sync=false
 				switch msg.Type() {
 				case gst.MessageEOS:
 					m.mu.Lock()
-					loopPath := m.currentLesson
+					stillClip := m.pipeline == pipe && m.currentMode == "clip"
 					m.mu.Unlock()
 
-					log.Printf("clip EOS received, restarting loop path=%s", loopPath)
-					if loopPath != "" {
-						time.Sleep(100 * time.Millisecond)
-						if err := m.SwitchToClip(loopPath); err != nil {
-							log.Printf("clip loop restart failed: %v", err)
-						} else {
-							log.Printf("clip loop restarted successfully")
+					if !stillClip {
+						return
+					}
+
+					plays++
+					if plays < 2 {
+						log.Printf("clip EOS play %d/2, seeking to start", plays)
+						seekEvent := gst.NewSeekEvent(
+							1.0,
+							gst.FormatTime,
+							gst.SeekFlagFlush|gst.SeekFlagKeyUnit,
+							gst.SeekTypeSet, 0,
+							gst.SeekTypeNone, -1,
+						)
+						if !pipe.SendEvent(seekEvent) {
+							log.Printf("clip seek failed")
+						}
+					} else {
+						log.Printf("clip finished 2 plays, switching to PNG")
+						if err := m.SwitchToPNG(); err != nil {
+							log.Printf("clip→PNG switch failed: %v", err)
 						}
 						return
 					}
