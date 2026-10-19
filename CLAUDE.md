@@ -84,14 +84,15 @@ JACK Audio (36 channels, 48kHz)
 - **[controller/manager_gogst.go](controller/manager_gogst.go)** — GStreamer pipeline engine (1844 lines). This is the core of the system: creates a persistent pipeline and hot-swaps sources without restarting. Built with `-tags gogst` (cgo required).
 - **[controller/manager_iface.go](controller/manager_iface.go)** — Interface definitions for the pipeline manager, allowing the build without GStreamer tags.
 - **[controller/capture_manager.go](controller/capture_manager.go)** — SDI capture integration.
+- **[controller/playlists.go](controller/playlists.go)** — Watches the editor's playlist feed (`https://shidur.kab.info/db/shidur/playlist`, every 30s) and keeps every playlist prepared in memory: each in/out pair becomes a segment, consecutive segments with the same audio layout are stitched into one HLS stream, and the pipeline routing audio to JACK is built from the master playlist (rules ported from Bnei-Baruch/media-streamer). The last feed is saved to `$STATE_DIR/playlist_feed.json` for restarts.
+- **[controller/hls_concat.go](controller/hls_concat.go)** — HLS helpers: master/media playlist parsing and stitching clips with `EXT-X-DISCONTINUITY`.
 
 ### Source Switching Model
 
 The GStreamer pipeline stays running continuously. Source switching works by swapping `uridecodebin` elements or using `funnel`/`selector` patterns — no pipeline teardown. Sources:
 - **PNG**: Static image via `filesrc` → `pngdec` → scale to 1920x1080i50
 - **Lesson**: MP4 file via `uridecodebin`
-- **HLS**: M3U8 URL via `uridecodebin` with hlsdemux
-- **HLS-Map**: Segmented playback via nginx VOD module manifest
+- **HLS**: M3U8 URL via `hlsdemux`. A playlist id plays its prepared segments: one stitched stream per audio layout, the pipeline rebuilt only where the layout changes, PNG after the last one. In-points must be on keyframes or A/V drifts at each join (the editor already snaps them).
 - **Playlist**: Sequential lesson files with preroll and PNG transitions between items
 
 ### Audio Routing
@@ -108,8 +109,11 @@ System state is written to JSON files in `$STATE_DIR` (default: `/opt/backup/sta
 POST /source/png          { "path": "/path/to/image.png" }
 POST /source/lesson       { "path": "/path/to/video.mp4", "loop": true }
 POST /source/hls          { "url": "http://..." }
-POST /source/hls/{id}     Switch to playlist item by ID
-POST /source/hls-map      { "url": "...", "map_file": "..." }
+POST /source/hls/{id}     Play prepared playlist {id} from the editor's feed
+GET  /api/playlists       Every playlist by id: total_ms, total, date, file_path, segments, parts (Companion reads total_ms)
+GET  /api/playlists/{id}  Segments, parts and pipelines of one playlist
+POST /api/playlists/refresh  Read the feed now instead of at the next poll
+GET  /hls-concat/{token}/{file}  Stitched HLS playlists (used by the pipeline itself)
 POST /playlist/prepare    { "urls": ["..."], "name": "..." }  — async download
 POST /playlist/start      { "name": "..." }
 POST /playlist/next
@@ -125,6 +129,8 @@ Environment variables are defined in `.env` (copy from `env.example`). Key varia
 | Variable | Purpose |
 |----------|---------|
 | `STATE_DIR` | Where JSON state files are written (default: `/opt/backup/state`) |
+| `PLAYLIST_SOURCE_URL` | Editor playlist feed (default: `https://shidur.kab.info/db/shidur/playlist`) |
+| `PLAYLIST_POLL` | How often the feed is checked (default: `30s`) |
 | `LOG_DIR` | Log file directory |
 | `JACK_RATE` | Audio sample rate (48000) |
 | `JACK_BUFFER` | JACK buffer size (256) |

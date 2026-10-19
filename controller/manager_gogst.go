@@ -87,7 +87,7 @@ func (m *goGstManager) SwitchToLesson(path string, loop bool, trackMap map[strin
 
 	// Fully tear down any existing pipeline and build minimal lesson→decklink graph.
 	if m.pipeline != nil {
-		_ = m.pipeline.SetState(gst.StateNull)
+		stopPipeline(m.pipeline, "previous pipeline")
 	}
 	m.pipeline = nil
 	m.vsel = nil
@@ -108,7 +108,7 @@ func (m *goGstManager) SwitchToLesson(path string, loop bool, trackMap map[strin
 	m.trackMap = trackMap
 
 	if err := m.buildLessonOnlyPipeline(path); err != nil {
-		return fmt.Errorf("build lesson-only pipeline: %w", err)
+		return m.fallbackToPNGLocked(fmt.Errorf("build lesson-only pipeline: %w", err))
 	}
 
 	log.Printf("SwitchToLesson: now playing %s", path)
@@ -123,7 +123,7 @@ func (m *goGstManager) SwitchToPNG() error {
 
 	// Fully tear down any existing pipeline
 	if m.pipeline != nil {
-		_ = m.pipeline.SetState(gst.StateNull)
+		stopPipeline(m.pipeline, "previous pipeline")
 	}
 	m.pipeline = nil
 	m.vsel = nil
@@ -159,7 +159,7 @@ func (m *goGstManager) SwitchToClip(path string) error {
 	log.Printf("SwitchToClip: requested path=%s", path)
 
 	if m.pipeline != nil {
-		_ = m.pipeline.SetState(gst.StateNull)
+		stopPipeline(m.pipeline, "previous pipeline")
 	}
 	m.pipeline = nil
 	m.vsel = nil
@@ -178,25 +178,32 @@ func (m *goGstManager) SwitchToClip(path string) error {
 	m.lessonLoop = true
 
 	if err := m.buildClipOnlyPipeline(path); err != nil {
-		return fmt.Errorf("build clip-only pipeline: %w", err)
+		return m.fallbackToPNGLocked(fmt.Errorf("build clip-only pipeline: %w", err))
 	}
 
 	log.Printf("SwitchToClip: now playing %s", path)
 	return nil
 }
 
-func (m *goGstManager) SwitchToHLS(url string, gstCommand string) error {
+func (m *goGstManager) SwitchToHLS(url string, pipeline string) error {
+	return m.SwitchToHLSSequence([]HLSJob{{URL: url, Pipeline: pipeline}})
+}
+
+// SwitchToHLSSequence plays jobs one after another, rebuilding the pipeline on each
+// EOS, then switches to PNG after the last one.
+func (m *goGstManager) SwitchToHLSSequence(jobs []HLSJob) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if url == "" {
+	if len(jobs) == 0 || jobs[0].URL == "" {
 		return fmt.Errorf("HLS URL is required")
 	}
+	url := jobs[0].URL
 	log.Printf("SwitchToHLS: requested url=%s", url)
 
 	// Fully tear down any existing pipeline
 	if m.pipeline != nil {
-		_ = m.pipeline.SetState(gst.StateNull)
+		stopPipeline(m.pipeline, "previous pipeline")
 	}
 	m.pipeline = nil
 	m.vsel = nil
@@ -214,8 +221,8 @@ func (m *goGstManager) SwitchToHLS(url string, gstCommand string) error {
 	m.currentStarted = time.Now()
 	m.lessonLoop = false
 
-	if err := m.buildHLSPipeline(url, gstCommand); err != nil {
-		return fmt.Errorf("build HLS pipeline: %w", err)
+	if err := m.buildHLSPipeline(jobs[0], jobs[1:]); err != nil {
+		return m.fallbackToPNGLocked(fmt.Errorf("build HLS pipeline: %w", err))
 	}
 
 	log.Printf("SwitchToHLS: now playing %s", url)
@@ -388,7 +395,7 @@ func (m *goGstManager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.pipeline != nil {
-		_ = m.pipeline.SetState(gst.StateNull)
+		stopPipeline(m.pipeline, "previous pipeline")
 		m.pipeline = nil
 	}
 	return nil
@@ -511,10 +518,70 @@ func logBusErrors(label string, pipe *gst.Pipeline) {
 		if msg.Type() == gst.MessageError {
 			err := msg.ParseError()
 			if err != nil {
-				log.Printf("%s bus error: %v", label, err)
+				log.Printf("%s bus error from %s: %v (%s)", label, msg.Source(), err, err.DebugString())
 			}
 		}
 	}
+}
+
+// stopPipeline sets pipe to NULL and waits until it gets there, so its DeckLink
+// output and JACK clients are released before the next pipeline opens them.
+func stopPipeline(pipe *gst.Pipeline, label string) {
+	if pipe == nil {
+		return
+	}
+	start := time.Now()
+	if err := pipe.SetState(gst.StateNull); err != nil {
+		log.Printf("%s: set NULL failed: %v", label, err)
+	}
+	for pipe.GetState() != gst.StateNull {
+		if time.Since(start) > 3*time.Second {
+			log.Printf("%s: still %s after 3s, DeckLink/JACK may stay held", label, pipe.GetState())
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		log.Printf("%s: stopping took %s", label, d.Round(time.Millisecond))
+	}
+}
+
+// startPipeline sets pipe to PLAYING. On failure it logs why, returns the pipeline
+// to NULL so nothing it opened stays held, and retries once after a second (the
+// DeckLink output can be briefly busy right after the previous pipeline stops).
+func startPipeline(pipe *gst.Pipeline, label string) error {
+	err := pipe.SetState(gst.StatePlaying)
+	if err == nil {
+		return nil
+	}
+	logBusErrors(label, pipe)
+	stopPipeline(pipe, label+" (failed start)")
+	log.Printf("%s: start failed (%v), retrying in 1s", label, err)
+	time.Sleep(time.Second)
+
+	if err = pipe.SetState(gst.StatePlaying); err == nil {
+		log.Printf("%s: started on retry", label)
+		return nil
+	}
+	logBusErrors(label, pipe)
+	stopPipeline(pipe, label+" (failed retry)")
+	return err
+}
+
+// fallbackToPNGLocked shows the PNG after a failed switch so the output is never
+// left empty. Caller holds m.mu.
+func (m *goGstManager) fallbackToPNGLocked(cause error) error {
+	log.Printf("switch failed (%v), falling back to PNG", cause)
+	m.pipeline = nil
+	m.currentMode = "png"
+	m.currentLesson = ""
+	m.currentStarted = time.Now()
+	m.lessonLoop = false
+	if err := m.buildPNGOnlyPipeline(); err != nil {
+		log.Printf("PNG fallback failed too: %v", err)
+		return fmt.Errorf("%v; PNG fallback failed: %v", cause, err)
+	}
+	return fmt.Errorf("%v (fell back to PNG)", cause)
 }
 
 // buildDecklinkBin creates the videoconvert/interlace chain terminating in
@@ -1347,8 +1414,7 @@ dem.audio_34 ! queue ! aacparse ! avdec_aac ! audioconvert ! audioresample ! aud
 		return fmt.Errorf("add lesson-only bin: %w", err)
 	}
 
-	if err := pipe.SetState(gst.StatePlaying); err != nil {
-		logBusErrors("pipeline", pipe)
+	if err := startPipeline(pipe, "pipeline"); err != nil {
 		return fmt.Errorf("set PLAYING: %w", err)
 	}
 
@@ -1490,8 +1556,7 @@ mono_tee. ! queue ! jackaudiosink client-name=gst-az  port-pattern=37 sync=false
 		return fmt.Errorf("add clip-only bin: %w", err)
 	}
 
-	if err := pipe.SetState(gst.StatePlaying); err != nil {
-		logBusErrors("pipeline", pipe)
+	if err := startPipeline(pipe, "pipeline"); err != nil {
 		return fmt.Errorf("set PLAYING: %w", err)
 	}
 
@@ -1605,8 +1670,7 @@ audiotestsrc wave=silence ! audio/x-raw,rate=48000,channels=1,format=F32LE ! jac
 		return fmt.Errorf("add png-only bin: %w", err)
 	}
 
-	if err := pipe.SetState(gst.StatePlaying); err != nil {
-		logBusErrors("pipeline", pipe)
+	if err := startPipeline(pipe, "pipeline"); err != nil {
 		return fmt.Errorf("set PLAYING: %w", err)
 	}
 
@@ -1624,53 +1688,22 @@ audiotestsrc wave=silence ! audio/x-raw,rate=48000,channels=1,format=F32LE ! jac
 	return nil
 }
 
-func (m *goGstManager) buildHLSPipeline(url string, gstCommand string) error {
+// hlsFadeOut is how long the last part of a playlist fades to black and silence
+// before it ends.
+const hlsFadeOut = time.Second
+
+func (m *goGstManager) buildHLSPipeline(job HLSJob, next []HLSJob) error {
 	gst.Init(nil)
 
+	url, desc := job.URL, job.Pipeline
+	if desc == "" {
+		return fmt.Errorf("no pipeline description for %s", url)
+	}
 	pipe, err := gst.NewPipeline("hls-pipeline")
 	if err != nil {
 		return err
 	}
-
-	var desc string
-
-	// If we have a gst-launch command from the API, parse it
-	if gstCommand != "" {
-		log.Printf("HLS: Using pipeline from API cmd_exec")
-		// Extract the pipeline description from gst-launch command
-		// Format: "gst-launch-1.0 -vvv <pipeline>"
-		desc = extractPipelineFromCommand(gstCommand)
-		log.Printf("HLS: Extracted pipeline (first 200 chars): %s...", truncate(desc, 200))
-	} else {
-		// Fallback to generic HLS pipeline
-		log.Printf("HLS: Using generic fallback pipeline")
-		modeName := decklinkModeString()
-		modeID := decklinkModeEnum(modeName)
-		sinkIdent := decklinkSinkIdentifier()
-
-		descTemplate := `
-videomixer name=mix ! videoconvert ! interlace field-pattern=2:2 top-field-first=true ! decklinkvideosink mode=%d %s
-souphttpsrc location=%s ! hlsdemux name=demux
-demux.src_0 ! tsdemux ! queue ! h264parse ! vtdec ! mix.
-demux.src_1 ! tsdemux ! queue ! aacparse ! fdkaacdec ! tee name=t
-t. ! deinterleave name=d
-d.src_0 ! queue ! audioconvert ! audioresample ! jackaudiosink client-name=gst-heb-L port-pattern=20 sync=false
-d.src_1 ! queue ! audioconvert ! audioresample ! jackaudiosink client-name=gst-heb-R port-pattern=21 sync=false
-demux.src_2 ! tsdemux ! queue ! aacparse ! fdkaacdec ! audioconvert ! audioresample ! jackaudiosink client-name=gst-en port-pattern=29 sync=false
-demux.src_3 ! tsdemux ! queue ! aacparse ! fdkaacdec ! audioconvert ! audioresample ! jackaudiosink client-name=gst-ru port-pattern=22 sync=false
-demux.src_4 ! tsdemux ! queue ! aacparse ! fdkaacdec ! audioconvert ! audioresample ! jackaudiosink client-name=gst-es port-pattern=30 sync=false
-demux.src_5 ! tsdemux ! queue ! aacparse ! fdkaacdec ! audioconvert ! audioresample ! jackaudiosink client-name=gst-fr port-pattern=1 sync=false
-demux.src_6 ! tsdemux ! queue ! aacparse ! fdkaacdec ! audioconvert ! audioresample ! jackaudiosink client-name=gst-it port-pattern=2 sync=false
-demux.src_7 ! tsdemux ! queue ! aacparse ! fdkaacdec ! audioconvert ! audioresample ! jackaudiosink client-name=gst-de port-pattern=3 sync=false
-demux.src_8 ! tsdemux ! queue ! aacparse ! fdkaacdec ! audioconvert ! audioresample ! jackaudiosink client-name=gst-pt port-pattern=5 sync=false
-demux.src_9 ! tsdemux ! queue ! aacparse ! fdkaacdec ! audioconvert ! audioresample ! jackaudiosink client-name=gst-tr port-pattern=4 sync=false
-t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-ar port-pattern=27 sync=false
-t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-id port-pattern=28 sync=false
-t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-null port-pattern=31 sync=false
-t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy port-pattern=32 sync=false`
-
-		desc = fmt.Sprintf(descTemplate, modeID, sinkIdent, url)
-	}
+	log.Printf("HLS: pipeline (first 200 chars): %s...", truncate(desc, 200))
 
 	parsed, err := gst.NewBinFromString(desc, false)
 	if err != nil {
@@ -1680,8 +1713,7 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 		return fmt.Errorf("add HLS bin: %w", err)
 	}
 
-	if err := pipe.SetState(gst.StatePlaying); err != nil {
-		logBusErrors("HLS pipeline", pipe)
+	if err := startPipeline(pipe, "HLS pipeline"); err != nil {
 		return fmt.Errorf("set HLS pipeline PLAYING: %w", err)
 	}
 
@@ -1701,7 +1733,23 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 			return
 		}
 
+		// The last part fades out over its final second, then EOS switches to PNG
+		var fadeAt time.Duration
+		if len(next) == 0 && job.DurationMs > 0 {
+			fadeAt = time.Duration(job.DurationMs)*time.Millisecond - hlsFadeOut
+		}
+		fading := false
+		var lastPosCheck time.Time
+
 		for {
+			if fadeAt > 0 && !fading && time.Since(lastPosCheck) >= 100*time.Millisecond {
+				lastPosCheck = time.Now()
+				if ok, pos := pipe.QueryPosition(gst.FormatTime); ok && time.Duration(pos) >= fadeAt {
+					fading = true
+					go m.fadeOutHLS(pipe)
+				}
+			}
+
 			msg := bus.TimedPop(100 * time.Millisecond)
 			if msg == nil {
 				// Check if pipeline still exists
@@ -1718,6 +1766,17 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 
 			switch msg.Type() {
 			case gst.MessageEOS:
+				if len(next) > 0 {
+					log.Printf("HLS part finished (EOS), rebuilding pipeline for next part (%d left): %s", len(next), next[0].URL)
+					go func() {
+						// On failure SwitchToHLSSequence has already fallen back to PNG
+						if err := m.SwitchToHLSSequence(next); err != nil {
+							log.Printf("HLS EOS: failed to start next part: %v", err)
+						}
+					}()
+					return
+				}
+
 				log.Printf("HLS stream finished (EOS), switching back to PNG")
 
 				// Switch back to PNG
@@ -1750,36 +1809,51 @@ t. ! audioconvert ! audioresample ! queue ! jackaudiosink client-name=gst-hy por
 	return nil
 }
 
-// extractPipelineFromCommand extracts the pipeline description from a gst-launch command
-// Input: "gst-launch-1.0 -vvv videomixer name=mix ! ..."
-// Output: "videomixer name=mix ! ..."
-func extractPipelineFromCommand(cmd string) string {
-	// Remove "gst-launch-1.0" and flags like "-vvv"
-	parts := strings.Fields(cmd)
-	var pipelineParts []string
-	skipNext := false
-
-	for i, part := range parts {
-		if i == 0 && strings.Contains(part, "gst-launch") {
-			continue // Skip gst-launch-1.0
-		}
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		if strings.HasPrefix(part, "-") {
-			// Skip flags like -vvv, -e, etc.
-			// Check if it's a flag with a value (like --gst-debug=2)
-			if strings.Contains(part, "=") {
-				continue
+// fadeOutHLS ramps the mixer's video alpha (over a black background) and every
+// fade volume to zero over hlsFadeOut. If EOS has not switched to PNG two seconds
+// later, it switches itself, so the output never stays black.
+func (m *goGstManager) fadeOutHLS(pipe *gst.Pipeline) {
+	elems, err := pipe.GetElementsRecursive()
+	if err != nil {
+		log.Printf("HLS fade-out: listing elements: %v", err)
+		return
+	}
+	var alphas []*gst.Pad
+	var volumes []*gst.Element
+	for _, e := range elems {
+		switch name := e.GetName(); {
+		case name == "mix":
+			if pads, err := e.GetSinkPads(); err == nil {
+				alphas = append(alphas, pads...)
 			}
-			// Otherwise, skip this and potentially the next token
-			continue
+		case strings.HasPrefix(name, fadePrefix):
+			volumes = append(volumes, e)
 		}
-		pipelineParts = append(pipelineParts, part)
+	}
+	log.Printf("HLS: fading out over %s (%d video inputs, %d audio volumes)", hlsFadeOut, len(alphas), len(volumes))
+
+	const steps = 25
+	for i := 1; i <= steps; i++ {
+		level := 1 - float64(i)/steps
+		for _, p := range alphas {
+			_ = p.SetProperty("alpha", level)
+		}
+		for _, v := range volumes {
+			_ = v.SetProperty("volume", level)
+		}
+		time.Sleep(hlsFadeOut / steps)
 	}
 
-	return strings.Join(pipelineParts, " ")
+	time.Sleep(2 * time.Second)
+	m.mu.Lock()
+	stillPlaying := m.pipeline == pipe && m.currentMode == "hls"
+	m.mu.Unlock()
+	if stillPlaying {
+		log.Printf("HLS: no EOS 2s after the fade-out, switching to PNG")
+		if err := m.SwitchToPNG(); err != nil {
+			log.Printf("HLS fade-out: switch to PNG failed: %v", err)
+		}
+	}
 }
 
 // truncate returns the first n characters of s
@@ -1813,7 +1887,7 @@ func (m *goGstManager) startPlaylistPlayback() error {
 
 	// Tear down any existing pipeline
 	if m.pipeline != nil {
-		_ = m.pipeline.SetState(gst.StateNull)
+		stopPipeline(m.pipeline, "previous pipeline")
 	}
 	m.pipeline = nil
 
@@ -1822,7 +1896,7 @@ func (m *goGstManager) startPlaylistPlayback() error {
 	playlistCurrentIndex = 0
 
 	if err := m.buildPlaylistPipeline(files); err != nil {
-		return fmt.Errorf("build playlist pipeline: %w", err)
+		return m.fallbackToPNGLocked(fmt.Errorf("build playlist pipeline: %w", err))
 	}
 
 	log.Printf("playlist playback: started with %d files", len(files))
@@ -1939,8 +2013,7 @@ func (m *goGstManager) buildPlaylistPipeline(files []string) error {
 		return fmt.Errorf("add playlist bin: %w", err)
 	}
 
-	if err := pipe.SetState(gst.StatePlaying); err != nil {
-		logBusErrors("playlist pipeline", pipe)
+	if err := startPipeline(pipe, "playlist pipeline"); err != nil {
 		return fmt.Errorf("set playlist pipeline PLAYING: %w", err)
 	}
 

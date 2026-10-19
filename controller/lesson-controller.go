@@ -257,63 +257,31 @@ func handleSourceHLS(w http.ResponseWriter, r *http.Request) {
 		playlist = req.Playlist
 	}
 
-	var hlsURL, gstCommand string
-
-	// If playlist ID provided, fetch from API
+	var jobs []HLSJob
 	if playlist != "" {
-		url := fmt.Sprintf("http://10.66.1.105:8081/api/playlist/list")
-
-		// Try Go HTTP client first
-		resp, err := http.Get(url)
-		var playlists map[string]struct {
-			Playlist []struct {
-				HLSPath string `json:"hls_path"`
-				CmdExec string `json:"cmd_exec"`
-			} `json:"playlist"`
-		}
-
-		if err != nil {
-			// Fallback to curl if Go HTTP client fails
-			log.Printf("HLS: Go HTTP client failed (%v), trying curl fallback", err)
-			cmd := exec.Command("curl", "-s", url)
-			output, curlErr := cmd.Output()
-			if curlErr != nil {
-				http.Error(w, fmt.Sprintf("failed to fetch playlist (curl): %v", curlErr), http.StatusInternalServerError)
-				return
-			}
-			if err := json.Unmarshal(output, &playlists); err != nil {
-				http.Error(w, fmt.Sprintf("failed to parse playlist (curl): %v", err), http.StatusInternalServerError)
-				return
-			}
-			log.Printf("HLS: curl fallback succeeded")
-		} else {
-			defer resp.Body.Close()
-			if err := json.NewDecoder(resp.Body).Decode(&playlists); err != nil {
-				http.Error(w, fmt.Sprintf("failed to parse playlist: %v", err), http.StatusInternalServerError)
-				return
-			}
-		}
-
-		playlistData, ok := playlists[playlist]
-		if !ok || len(playlistData.Playlist) == 0 {
-			http.Error(w, fmt.Sprintf("playlist %s not found", playlist), http.StatusNotFound)
+		var status int
+		var err error
+		if jobs, status, err = playlistJobs(playlist); err != nil {
+			http.Error(w, err.Error(), status)
 			return
 		}
-
-		hlsURL = playlistData.Playlist[0].HLSPath
-		gstCommand = playlistData.Playlist[0].CmdExec
-		log.Printf("HLS: Using playlist %s, URL=%s", playlist, hlsURL)
+		log.Printf("HLS: playing playlist %s (%d parts)", playlist, len(jobs))
 	} else if req.URL != "" {
-		hlsURL = req.URL
-		log.Printf("HLS: Using direct URL=%s", hlsURL)
+		job, err := directHLSJob(req.URL)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		jobs = []HLSJob{job}
+		log.Printf("HLS: playing direct URL=%s", req.URL)
 	} else {
 		http.Error(w, "either playlist or url is required", http.StatusBadRequest)
 		return
 	}
 
 	// Type assertion to access HLS method
-	if hlsManager, ok := manager.(interface{ SwitchToHLS(string, string) error }); ok {
-		if err := hlsManager.SwitchToHLS(hlsURL, gstCommand); err != nil {
+	if hlsManager, ok := manager.(interface{ SwitchToHLSSequence([]HLSJob) error }); ok {
+		if err := hlsManager.SwitchToHLSSequence(jobs); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -324,103 +292,6 @@ func handleSourceHLS(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("OK"))
-}
-
-// handleSourceHLSMap plays HLS from VOD module with mapped JSON
-// Uses cmd_exec from API but replaces URL with VOD module mapped URL
-func handleSourceHLSMap(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	playlist := vars["playlist"]
-	if playlist == "" {
-		http.Error(w, "playlist is required in URL path", http.StatusBadRequest)
-		return
-	}
-
-	// Fetch cmd_exec from API (same as handleSourceHLS)
-	apiURL := "http://10.66.1.105:8081/api/playlist/list"
-	resp, err := http.Get(apiURL)
-	var playlists map[string]struct {
-		Playlist []struct {
-			HLSPath string `json:"hls_path"`
-			CmdExec string `json:"cmd_exec"`
-		} `json:"playlist"`
-	}
-
-	if err != nil {
-		// Fallback to curl if Go HTTP client fails
-		log.Printf("HLS-Map: Go HTTP client failed (%v), trying curl fallback", err)
-		cmd := exec.Command("curl", "-s", apiURL)
-		output, curlErr := cmd.Output()
-		if curlErr != nil {
-			http.Error(w, fmt.Sprintf("failed to fetch playlist (curl): %v", curlErr), http.StatusInternalServerError)
-			return
-		}
-		if err := json.Unmarshal(output, &playlists); err != nil {
-			http.Error(w, fmt.Sprintf("failed to parse playlist (curl): %v", err), http.StatusInternalServerError)
-			return
-		}
-	} else {
-		defer resp.Body.Close()
-		if err := json.NewDecoder(resp.Body).Decode(&playlists); err != nil {
-			http.Error(w, fmt.Sprintf("failed to parse playlist: %v", err), http.StatusInternalServerError)
-			return
-		}
-	}
-
-	playlistData, ok := playlists[playlist]
-	if !ok || len(playlistData.Playlist) == 0 {
-		http.Error(w, fmt.Sprintf("playlist %s not found", playlist), http.StatusNotFound)
-		return
-	}
-
-	gstCommand := playlistData.Playlist[0].CmdExec
-
-	// Build VOD module mapped URL
-	vodURL := fmt.Sprintf("http://10.66.1.76:8080/hls/%s.json/master.m3u8", playlist)
-
-	// Replace URL in cmd_exec with VOD URL
-	modifiedCmd := replaceHLSURL(gstCommand, vodURL)
-
-	log.Printf("HLS-Map: playlist=%s, vodURL=%s", playlist, vodURL)
-
-	// Type assertion to access HLS method
-	if hlsManager, ok := manager.(interface{ SwitchToHLS(string, string) error }); ok {
-		if err := hlsManager.SwitchToHLS(vodURL, modifiedCmd); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	} else {
-		http.Error(w, "HLS not supported by this manager", http.StatusNotImplemented)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("OK"))
-}
-
-// replaceHLSURL replaces the HLS URL in a gst-launch command
-// Looks for location="..." or location=... pattern and replaces the URL
-func replaceHLSURL(cmd, newURL string) string {
-	// Pattern 1: location="url"
-	if idx := strings.Index(cmd, `location="`); idx != -1 {
-		start := idx + len(`location="`)
-		end := strings.Index(cmd[start:], `"`)
-		if end != -1 {
-			return cmd[:start] + newURL + cmd[start+end:]
-		}
-	}
-	// Pattern 2: location=url (no quotes, ends at space or !)
-	if idx := strings.Index(cmd, "location="); idx != -1 {
-		start := idx + len("location=")
-		// Find end of URL (space or !)
-		end := strings.IndexAny(cmd[start:], " !")
-		if end == -1 {
-			end = len(cmd) - start
-		}
-		return cmd[:start] + newURL + cmd[start+end:]
-	}
-	// No location found, return original
-	return cmd
 }
 
 func handlePlaylistPrepare(w http.ResponseWriter, r *http.Request) {
@@ -626,7 +497,11 @@ func main() {
 	r.HandleFunc("/source/clip", handleSourceClip).Methods(http.MethodPost)
 	r.HandleFunc("/source/hls", handleSourceHLS).Methods(http.MethodPost)
 	r.HandleFunc("/source/hls/{playlist}", handleSourceHLS).Methods(http.MethodPost)
-	r.HandleFunc("/source/hls-map/{playlist}", handleSourceHLSMap).Methods(http.MethodPost)
+	r.HandleFunc("/hls-concat/{token}/{file}", handleHLSConcatFile).Methods(http.MethodGet)
+	r.HandleFunc("/api/playlists", handlePlaylists).Methods(http.MethodGet)
+	r.HandleFunc("/api/playlists/refresh", handlePlaylistsRefresh).Methods(http.MethodPost)
+	r.HandleFunc("/api/playlists/{id}", handlePlaylist).Methods(http.MethodGet)
+	r.HandleFunc("/api/playlist/load/{id}", handleFeedPlaylistLoad).Methods(http.MethodGet)
 	r.HandleFunc("/playlist/prepare", handlePlaylistPrepare).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/load", handlePlaylistLoad).Methods(http.MethodPost)
 	r.HandleFunc("/playlist/start", handlePlaylistStart).Methods(http.MethodPost)
@@ -636,11 +511,9 @@ func main() {
 	r.HandleFunc("/v1/capture/stop", handleCaptureStop).Methods(http.MethodPost)
 	r.HandleFunc("/v1/capture", handleCaptureStatus).Methods(http.MethodGet)
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8788"
-	}
-	addr := ":" + port
+	addr := ":" + listenPort()
+
+	startPlaylistWatcher()
 
 	// Create HTTP server with graceful shutdown support
 	srv := &http.Server{
