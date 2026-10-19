@@ -232,9 +232,40 @@ python3 -m py_compile server/status_http.py
 
 ### Logs
 
+- **Controller log**: `/opt/backup/logs/lesson_controller.log` — all controller
+  output, including panic traces and crash reports. The controller redirects its
+  own stdout/stderr here at startup, so this survives the process being killed.
+  Rolls over at 32 MB, keeping 5 old files.
+- **Crash tally**: `/opt/backup/logs/lesson_controller.crashes.log` — one line
+  per unclean exit, with the timestamp and what was on air at the time.
 - **Playout logs**: `/opt/backup/logs/playout_gst.log`
 - **HTTP server logs**: `/opt/backup/logs/status_http_playout.out`
-- **System logs**: Check `journalctl` or system logs
+
+To keep output on the terminal instead of the log file when running by hand:
+
+```bash
+LOG_TO_STDERR=1 /usr/local/bin/lesson-controller
+```
+
+### Investigating a Crash
+
+The controller writes a run marker while it is alive and removes it on graceful
+shutdown. A marker still present at startup means the previous run was killed
+rather than stopped, and the next start says so:
+
+```
+WARNING: previous run (pid 37585, started ...) did not shut down cleanly —
+last alive 2026-09-18T11:20:59+03:00, on air: lesson lesson-1.mp4
+```
+
+When that appears, the macOS crash report names the library that faulted:
+
+```bash
+ls -lt ~/Library/Logs/DiagnosticReports/ | head
+```
+
+No report at all means the process was SIGKILLed — usually the OS reclaiming
+memory, which points at a leak rather than a fault.
 
 ## Contributing
 

@@ -569,7 +569,15 @@ func handleCaptureStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	// Must come first: it moves stdout/stderr into the log file, so anything
+	// logged (or crashed) after this point is on disk rather than on a
+	// terminal nobody is watching.
+	setupLogging()
 	log.Printf("lesson-controller starting (PID=%d)", os.Getpid())
+
+	// Report whether the previous run was stopped or killed, before this run
+	// overwrites the marker.
+	reportPreviousRun()
 	// Optional: read map from env or default sample
 	mapPath := os.Getenv("AUDIO_MAP_PATH")
 	if mapPath == "" {
@@ -597,6 +605,11 @@ func main() {
 		log.Fatalf("go-gst manager not available: %v", err)
 	}
 	manager = mgr
+
+	// From here on the marker is refreshed on a heartbeat; it is removed again
+	// only by the graceful shutdown path below.
+	startRunMarker()
+
 	if err := manager.BuildPipeline(); err != nil {
 		log.Printf("warning: pipeline not built yet: %v", err)
 	} else {
@@ -659,6 +672,10 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("server shutdown error: %v", err)
 	}
+
+	// Last: the missing marker is what tells the next run that this one ended
+	// on purpose.
+	clearRunMarker()
 
 	log.Printf("shutdown complete")
 }

@@ -52,6 +52,14 @@ python3 -m py_compile server/status_http.py
 ./scripts/deploy-controller-to-prod.sh    # Deploy to production
 ```
 
+### Logs
+
+The controller redirects its own stdout/stderr to `$LOG_DIR/lesson_controller.log`
+at startup (fd-level, so panic traces and cgo crash reports are captured); set
+`LOG_TO_STDERR=1` to keep output on the terminal. Unclean exits are detected via a
+run marker in `$STATE_DIR/controller_run.json` and tallied in
+`$LOG_DIR/lesson_controller.crashes.log`.
+
 There are no automated tests. Validation is done by running the system and exercising the HTTP API.
 
 ## Architecture
